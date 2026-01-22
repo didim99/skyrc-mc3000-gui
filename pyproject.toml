@@ -39,6 +39,12 @@ dependencies = [
     "numpy>=1.20.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/nuclearcat/SkyRCMC3000-GUI"
+Repository = "https://github.com/nuclearcat/SkyRCMC3000-GUI"
+Documentation = "https://github.com/nuclearcat/SkyRCMC3000-GUI/tree/main/docs"
+"Bug Tracker" = "https://github.com/nuclearcat/SkyRCMC3000-GUI/issues"
+
 [project.optional-dependencies]
 dev = [
     "pytest",
@@ -53,13 +59,13 @@ mc3000-backup = "mc3000_backup:main"
 [project.gui-scripts]
 mc3000 = "mc3000_gui:run_gui"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["mc3000*"]
-
 [tool.setuptools]
 py-modules = ["mc3000_protocol", "mc3000_usb", "mc3000_gui", "mc3000_config", "mc3000_profiles", "mc3000_graphs", "mc3000_backup", "main"]
 include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mc3000*"]
 
 [tool.setuptools.package-data]
 "*" = ["data/*.json"]
