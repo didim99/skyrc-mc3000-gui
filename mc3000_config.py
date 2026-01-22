@@ -1,0 +1,678 @@
+"""
+MC3000 Slot Configuration
+
+Dialog and data structures for configuring MC3000 charger slots.
+"""
+
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
+from enum import IntEnum
+
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QComboBox, QSpinBox, QDoubleSpinBox,
+    QPushButton, QGroupBox, QTabWidget, QWidget,
+    QMessageBox, QFormLayout, QCheckBox, QInputDialog,
+)
+from PySide6.QtCore import Qt, Signal
+
+from mc3000_protocol import BATTERY_TYPES, OPERATION_MODES_LI, OPERATION_MODES_NI, OPERATION_MODES_ZN, SlotSettings
+
+# Try to import profiles module
+try:
+    from mc3000_profiles import ProfileManager, ProfileDialog
+    PROFILES_AVAILABLE = True
+except ImportError:
+    PROFILES_AVAILABLE = False
+    ProfileManager = None
+    ProfileDialog = None
+
+
+
+class BatteryType(IntEnum):
+    LiIon = 0
+    LiFe = 1
+    LiHV = 2
+    NiMH = 3
+    NiCd = 4
+    NiZn = 5
+    Eneloop = 6
+    RAM = 7
+
+
+class CycleMode(IntEnum):
+    CHARGE_DISCHARGE = 0  # C>D
+    CHARGE_DISCHARGE_CHARGE = 1  # C>D>C
+    DISCHARGE_CHARGE = 2  # D>C
+    DISCHARGE_CHARGE_DISCHARGE = 3  # D>C>D
+
+
+@dataclass
+class SlotConfig:
+    """Configuration for a single charger slot."""
+    slot_number: int = 0
+    battery_type: int = 0
+    operation_mode: int = 0
+    capacity_mah: int = 2000
+    charge_current_ma: int = 1000
+    discharge_current_ma: int = 500
+    discharge_cut_voltage_mv: int = 900
+    charge_end_voltage_mv: int = 1450
+    charge_end_current_ma: int = 100
+    discharge_reduce_current_ma: int = 300
+    num_cycles: int = 1
+    charge_resting_min: int = 3
+    discharge_resting_min: int = 3
+    cycle_mode: int = 0
+    peak_sense_mv: int = 5  # -dV for Ni cells
+    trickle_current_ma: int = 50
+    trickle_time: int = 0  # 0=OFF, 1=End, 2=Rest
+    restart_voltage_mv: int = 1000
+    cut_temperature_c: int = 45
+    cut_time_min: int = 120
+
+    def get_operation_modes(self) -> Dict[int, str]:
+        """Get available operation modes for current battery type."""
+        if self.battery_type <= 2:  # Li batteries
+            return OPERATION_MODES_LI
+        elif self.battery_type in (3, 4, 6):  # Ni batteries
+            return OPERATION_MODES_NI
+        else:  # Zn/RAM
+            return OPERATION_MODES_ZN
+
+    def get_voltage_limits(self) -> tuple:
+        """Get min/max voltage limits for current battery type."""
+        limits = {
+            0: (2500, 4200),  # LiIon
+            1: (2000, 3600),  # LiFe
+            2: (2500, 4350),  # LiHV
+            3: (900, 1600),   # NiMH
+            4: (900, 1550),   # NiCd
+            5: (1200, 1900),  # NiZn
+            6: (900, 1500),   # Eneloop
+            7: (1200, 1800),  # RAM
+        }
+        return limits.get(self.battery_type, (500, 5000))
+
+    def to_bytes(self, firmware_version: int = 123) -> bytes:
+        """Convert configuration to bytes for sending to device."""
+        buf = bytearray(64)
+
+        if firmware_version <= 111:
+            buf[0] = 0x0F
+            buf[1] = 0x1D  # 29 bytes
+            buf[2] = 0x11  # Set slot command
+            buf[3] = 0x00
+            buf[4] = self.slot_number
+            buf[5] = self.battery_type
+            buf[6] = self.capacity_mah // 100  # Capacity in 100mAh units
+            buf[7] = self.operation_mode
+            # Charge current (2 bytes, big-endian)
+            buf[8] = (self.charge_current_ma >> 8) & 0xFF
+            buf[9] = self.charge_current_ma & 0xFF
+            # Discharge current (big-endian)
+            buf[10] = (self.discharge_current_ma >> 8) & 0xFF
+            buf[11] = self.discharge_current_ma & 0xFF
+            # Discharge cut voltage (big-endian)
+            buf[12] = (self.discharge_cut_voltage_mv >> 8) & 0xFF
+            buf[13] = self.discharge_cut_voltage_mv & 0xFF
+            # Charge end voltage (big-endian)
+            buf[14] = (self.charge_end_voltage_mv >> 8) & 0xFF
+            buf[15] = self.charge_end_voltage_mv & 0xFF
+            # Charge end current (big-endian)
+            buf[16] = (self.charge_end_current_ma >> 8) & 0xFF
+            buf[17] = self.charge_end_current_ma & 0xFF
+            # Discharge reduce current (big-endian)
+            buf[18] = (self.discharge_reduce_current_ma >> 8) & 0xFF
+            buf[19] = self.discharge_reduce_current_ma & 0xFF
+            buf[20] = self.num_cycles
+            buf[21] = self.charge_resting_min
+            buf[22] = self.cycle_mode
+            buf[23] = self.peak_sense_mv
+            buf[24] = self.trickle_current_ma
+            buf[25] = self.cut_temperature_c
+            # Cut time (big-endian)
+            buf[26] = (self.cut_time_min >> 8) & 0xFF
+            buf[27] = self.cut_time_min & 0xFF
+            # Restart voltage (big-endian)
+            buf[28] = (self.restart_voltage_mv >> 8) & 0xFF
+            buf[29] = self.restart_voltage_mv & 0xFF
+            # Checksum
+            buf[30] = sum(buf[2:30]) % 256
+            buf[31] = 0xFF
+            buf[32] = 0xFF
+        else:
+            buf[0] = 0x0F
+            buf[1] = 0x20  # 32 bytes
+            buf[2] = 0x11  # Set slot command
+            buf[3] = 0x00
+            buf[4] = self.slot_number
+            buf[5] = self.battery_type
+            # Capacity (2 bytes, big-endian)
+            buf[6] = (self.capacity_mah >> 8) & 0xFF
+            buf[7] = self.capacity_mah & 0xFF
+            buf[8] = self.operation_mode
+            # Charge current (big-endian)
+            buf[9] = (self.charge_current_ma >> 8) & 0xFF
+            buf[10] = self.charge_current_ma & 0xFF
+            # Discharge current (big-endian)
+            buf[11] = (self.discharge_current_ma >> 8) & 0xFF
+            buf[12] = self.discharge_current_ma & 0xFF
+            # Discharge cut voltage (big-endian)
+            buf[13] = (self.discharge_cut_voltage_mv >> 8) & 0xFF
+            buf[14] = self.discharge_cut_voltage_mv & 0xFF
+            # Charge end voltage (big-endian)
+            buf[15] = (self.charge_end_voltage_mv >> 8) & 0xFF
+            buf[16] = self.charge_end_voltage_mv & 0xFF
+            # Charge end current (big-endian)
+            buf[17] = (self.charge_end_current_ma >> 8) & 0xFF
+            buf[18] = self.charge_end_current_ma & 0xFF
+            # Discharge reduce current (big-endian)
+            buf[19] = (self.discharge_reduce_current_ma >> 8) & 0xFF
+            buf[20] = self.discharge_reduce_current_ma & 0xFF
+            buf[21] = self.num_cycles
+            buf[22] = self.charge_resting_min
+            buf[23] = self.discharge_resting_min
+            buf[24] = self.cycle_mode
+            buf[25] = self.peak_sense_mv
+            buf[26] = self.trickle_current_ma
+            buf[27] = self.trickle_time
+            buf[28] = self.cut_temperature_c
+            # Cut time (big-endian)
+            buf[29] = (self.cut_time_min >> 8) & 0xFF
+            buf[30] = self.cut_time_min & 0xFF
+            # Restart voltage (big-endian)
+            buf[31] = (self.restart_voltage_mv >> 8) & 0xFF
+            buf[32] = self.restart_voltage_mv & 0xFF
+            # Checksum
+            buf[33] = sum(buf[2:33]) % 256
+            buf[34] = 0xFF
+            buf[35] = 0xFF
+
+        return bytes(buf)
+
+
+class SlotConfigWidget(QWidget):
+    """Widget for configuring a single slot."""
+
+    configChanged = Signal()
+
+    def __init__(self, slot_number: int, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.slot_number = slot_number
+        self.config = SlotConfig(slot_number=slot_number)
+        self._setup_ui()
+        self._connect_signals()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Battery type and mode
+        type_group = QGroupBox("Battery Settings")
+        type_layout = QFormLayout(type_group)
+
+        self.battery_type_combo = QComboBox()
+        for idx, name in BATTERY_TYPES.items():
+            self.battery_type_combo.addItem(name, idx)
+        type_layout.addRow("Battery Type:", self.battery_type_combo)
+
+        self.mode_combo = QComboBox()
+        self._update_mode_combo()
+        type_layout.addRow("Mode:", self.mode_combo)
+
+        self.capacity_spin = QSpinBox()
+        self.capacity_spin.setRange(100, 20000)
+        self.capacity_spin.setSingleStep(100)
+        self.capacity_spin.setValue(2000)
+        self.capacity_spin.setSuffix(" mAh")
+        type_layout.addRow("Capacity:", self.capacity_spin)
+
+        layout.addWidget(type_group)
+
+        # Current settings
+        current_group = QGroupBox("Current Settings")
+        current_layout = QFormLayout(current_group)
+
+        self.charge_current_spin = QSpinBox()
+        self.charge_current_spin.setRange(100, 3000)
+        self.charge_current_spin.setSingleStep(100)
+        self.charge_current_spin.setValue(1000)
+        self.charge_current_spin.setSuffix(" mA")
+        current_layout.addRow("Charge Current:", self.charge_current_spin)
+
+        self.discharge_current_spin = QSpinBox()
+        self.discharge_current_spin.setRange(100, 2000)
+        self.discharge_current_spin.setSingleStep(100)
+        self.discharge_current_spin.setValue(500)
+        self.discharge_current_spin.setSuffix(" mA")
+        current_layout.addRow("Discharge Current:", self.discharge_current_spin)
+
+        self.end_current_spin = QSpinBox()
+        self.end_current_spin.setRange(50, 500)
+        self.end_current_spin.setSingleStep(10)
+        self.end_current_spin.setValue(100)
+        self.end_current_spin.setSuffix(" mA")
+        current_layout.addRow("End Current (CC/CV):", self.end_current_spin)
+
+        layout.addWidget(current_group)
+
+        # Voltage settings
+        voltage_group = QGroupBox("Voltage Settings")
+        voltage_layout = QFormLayout(voltage_group)
+
+        self.end_voltage_spin = QSpinBox()
+        self.end_voltage_spin.setRange(500, 5000)
+        self.end_voltage_spin.setSingleStep(10)
+        self.end_voltage_spin.setValue(1450)
+        self.end_voltage_spin.setSuffix(" mV")
+        voltage_layout.addRow("Target Voltage:", self.end_voltage_spin)
+
+        self.cut_voltage_spin = QSpinBox()
+        self.cut_voltage_spin.setRange(500, 4000)
+        self.cut_voltage_spin.setSingleStep(10)
+        self.cut_voltage_spin.setValue(900)
+        self.cut_voltage_spin.setSuffix(" mV")
+        voltage_layout.addRow("Cut-off Voltage:", self.cut_voltage_spin)
+
+        layout.addWidget(voltage_group)
+
+        # Cycle settings
+        cycle_group = QGroupBox("Cycle Settings")
+        cycle_layout = QFormLayout(cycle_group)
+
+        self.cycle_count_spin = QSpinBox()
+        self.cycle_count_spin.setRange(1, 99)
+        self.cycle_count_spin.setValue(1)
+        cycle_layout.addRow("Cycle Count:", self.cycle_count_spin)
+
+        self.cycle_mode_combo = QComboBox()
+        self.cycle_mode_combo.addItems(["C>D", "C>D>C", "D>C", "D>C>D"])
+        cycle_layout.addRow("Cycle Mode:", self.cycle_mode_combo)
+
+        self.rest_time_spin = QSpinBox()
+        self.rest_time_spin.setRange(1, 60)
+        self.rest_time_spin.setValue(3)
+        self.rest_time_spin.setSuffix(" min")
+        cycle_layout.addRow("Rest Time:", self.rest_time_spin)
+
+        layout.addWidget(cycle_group)
+
+        # Safety settings
+        safety_group = QGroupBox("Safety Limits")
+        safety_layout = QFormLayout(safety_group)
+
+        self.cut_temp_spin = QSpinBox()
+        self.cut_temp_spin.setRange(20, 80)
+        self.cut_temp_spin.setValue(45)
+        self.cut_temp_spin.setSuffix(" °C")
+        safety_layout.addRow("Cut-off Temp:", self.cut_temp_spin)
+
+        self.cut_time_spin = QSpinBox()
+        self.cut_time_spin.setRange(0, 600)
+        self.cut_time_spin.setValue(120)
+        self.cut_time_spin.setSuffix(" min")
+        self.cut_time_spin.setSpecialValueText("OFF")
+        safety_layout.addRow("Cut-off Time:", self.cut_time_spin)
+
+        layout.addWidget(safety_group)
+
+        layout.addStretch()
+
+    def _connect_signals(self):
+        self.battery_type_combo.currentIndexChanged.connect(self._on_battery_type_changed)
+        self.battery_type_combo.currentIndexChanged.connect(self.configChanged)
+        self.mode_combo.currentIndexChanged.connect(self.configChanged)
+        self.capacity_spin.valueChanged.connect(self.configChanged)
+        self.charge_current_spin.valueChanged.connect(self.configChanged)
+        self.discharge_current_spin.valueChanged.connect(self.configChanged)
+        self.end_current_spin.valueChanged.connect(self.configChanged)
+        self.end_voltage_spin.valueChanged.connect(self.configChanged)
+        self.cut_voltage_spin.valueChanged.connect(self.configChanged)
+        self.cycle_count_spin.valueChanged.connect(self.configChanged)
+        self.cycle_mode_combo.currentIndexChanged.connect(self.configChanged)
+        self.rest_time_spin.valueChanged.connect(self.configChanged)
+        self.cut_temp_spin.valueChanged.connect(self.configChanged)
+        self.cut_time_spin.valueChanged.connect(self.configChanged)
+
+    def _on_battery_type_changed(self, index):
+        self._update_mode_combo()
+        self._update_voltage_limits()
+
+    def _update_mode_combo(self):
+        self.mode_combo.clear()
+        battery_type = self.battery_type_combo.currentData()
+        if battery_type is None:
+            battery_type = 0
+        self.config.battery_type = battery_type
+        modes = self.config.get_operation_modes()
+        for idx, name in modes.items():
+            self.mode_combo.addItem(name, idx)
+
+    def _update_voltage_limits(self):
+        min_v, max_v = self.config.get_voltage_limits()
+        self.end_voltage_spin.setRange(min_v, max_v)
+        self.cut_voltage_spin.setRange(min_v - 500, max_v)
+
+    def get_config(self) -> SlotConfig:
+        """Get current configuration from UI."""
+        return SlotConfig(
+            slot_number=self.slot_number,
+            battery_type=self.battery_type_combo.currentData() or 0,
+            operation_mode=self.mode_combo.currentData() or 0,
+            capacity_mah=self.capacity_spin.value(),
+            charge_current_ma=self.charge_current_spin.value(),
+            discharge_current_ma=self.discharge_current_spin.value(),
+            charge_end_voltage_mv=self.end_voltage_spin.value(),
+            discharge_cut_voltage_mv=self.cut_voltage_spin.value(),
+            charge_end_current_ma=self.end_current_spin.value(),
+            num_cycles=self.cycle_count_spin.value(),
+            cycle_mode=self.cycle_mode_combo.currentIndex(),
+            charge_resting_min=self.rest_time_spin.value(),
+            discharge_resting_min=self.rest_time_spin.value(),
+            cut_temperature_c=self.cut_temp_spin.value(),
+            cut_time_min=self.cut_time_spin.value(),
+        )
+
+    def set_config(self, config: SlotConfig):
+        """Set UI from configuration."""
+        self.battery_type_combo.setCurrentIndex(
+            self.battery_type_combo.findData(config.battery_type)
+        )
+        self._update_mode_combo()
+        self.mode_combo.setCurrentIndex(
+            self.mode_combo.findData(config.operation_mode)
+        )
+        self.capacity_spin.setValue(config.capacity_mah)
+        self.charge_current_spin.setValue(config.charge_current_ma)
+        self.discharge_current_spin.setValue(config.discharge_current_ma)
+        self.end_voltage_spin.setValue(config.charge_end_voltage_mv)
+        self.cut_voltage_spin.setValue(config.discharge_cut_voltage_mv)
+        self.end_current_spin.setValue(config.charge_end_current_ma)
+        self.cycle_count_spin.setValue(config.num_cycles)
+        self.cycle_mode_combo.setCurrentIndex(config.cycle_mode)
+        self.rest_time_spin.setValue(config.charge_resting_min)
+        self.cut_temp_spin.setValue(config.cut_temperature_c)
+        self.cut_time_spin.setValue(config.cut_time_min)
+
+    def set_from_slot_settings(self, settings: SlotSettings):
+        """Set UI from SlotSettings read from device."""
+        self.battery_type_combo.setCurrentIndex(
+            self.battery_type_combo.findData(settings.battery_type)
+        )
+        self._update_mode_combo()
+        self.mode_combo.setCurrentIndex(
+            self.mode_combo.findData(settings.operation_mode)
+        )
+        self.capacity_spin.setValue(settings.capacity_mah)
+        self.charge_current_spin.setValue(settings.charge_current_ma)
+        self.discharge_current_spin.setValue(settings.discharge_current_ma)
+        self.end_voltage_spin.setValue(settings.charge_end_voltage_mv)
+        self.cut_voltage_spin.setValue(settings.discharge_cut_voltage_mv)
+        self.end_current_spin.setValue(settings.charge_end_current_ma)
+        self.cycle_count_spin.setValue(settings.num_cycles)
+        self.cycle_mode_combo.setCurrentIndex(settings.cycle_mode)
+        self.rest_time_spin.setValue(settings.charge_resting_min)
+        self.cut_temp_spin.setValue(settings.cut_temperature_c)
+        self.cut_time_spin.setValue(settings.cut_time_min)
+
+
+class SlotConfigDialog(QDialog):
+    """Dialog for configuring charger slots."""
+
+    def __init__(self, mc3000_usb, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.mc3000 = mc3000_usb
+        self.profile_manager = ProfileManager() if PROFILES_AVAILABLE else None
+        self.setWindowTitle("Slot Configuration")
+        self.setMinimumSize(420, 760)
+        self.resize(520, 820)
+        self._setup_ui()
+        self._read_all_configs(show_message=False)
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Tab widget for each slot
+        self.tab_widget = QTabWidget()
+        self.slot_widgets: List[SlotConfigWidget] = []
+
+        for i in range(4):
+            widget = SlotConfigWidget(i)
+            self.slot_widgets.append(widget)
+            self.tab_widget.addTab(widget, f"Slot {i + 1}")
+
+        layout.addWidget(self.tab_widget)
+
+        # Copy settings controls
+        copy_group = QGroupBox("Copy Settings")
+        copy_layout = QHBoxLayout(copy_group)
+
+        copy_layout.addWidget(QLabel("Copy from:"))
+        self.copy_from_combo = QComboBox()
+        self.copy_from_combo.addItems(["Slot 1", "Slot 2", "Slot 3", "Slot 4"])
+        copy_layout.addWidget(self.copy_from_combo)
+
+        copy_layout.addWidget(QLabel("to:"))
+        self.copy_to_combo = QComboBox()
+        self.copy_to_combo.addItems(["Slot 1", "Slot 2", "Slot 3", "Slot 4"])
+        self.copy_to_combo.setCurrentIndex(1)
+        copy_layout.addWidget(self.copy_to_combo)
+
+        copy_btn = QPushButton("Copy")
+        copy_btn.clicked.connect(self._copy_settings)
+        copy_layout.addWidget(copy_btn)
+
+        copy_layout.addStretch()
+        layout.addWidget(copy_group)
+
+        # Profile controls
+        if PROFILES_AVAILABLE:
+            profile_group = QGroupBox("Profiles")
+            profile_layout = QHBoxLayout(profile_group)
+
+            self.load_profile_btn = QPushButton("Load Profile...")
+            self.load_profile_btn.clicked.connect(self._load_profile)
+            profile_layout.addWidget(self.load_profile_btn)
+
+            self.save_profile_btn = QPushButton("Save as Profile...")
+            self.save_profile_btn.clicked.connect(self._save_profile)
+            profile_layout.addWidget(self.save_profile_btn)
+
+            profile_layout.addStretch()
+            layout.addWidget(profile_group)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+
+        self.start_after_apply_cb = QCheckBox("Start after apply")
+        button_layout.addWidget(self.start_after_apply_cb)
+
+        self.apply_btn = QPushButton("Apply to Charger")
+        self.apply_btn.clicked.connect(self._apply_config)
+        button_layout.addWidget(self.apply_btn)
+
+        self.read_all_btn = QPushButton("Read All Slots")
+        self.read_all_btn.clicked.connect(self._read_all_configs)
+        button_layout.addWidget(self.read_all_btn)
+
+        button_layout.addStretch()
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        button_layout.addWidget(close_btn)
+
+        layout.addLayout(button_layout)
+
+    def _copy_settings(self):
+        """Copy settings from one slot to another."""
+        from_idx = self.copy_from_combo.currentIndex()
+        to_idx = self.copy_to_combo.currentIndex()
+
+        if from_idx == to_idx:
+            QMessageBox.warning(self, "Copy Error", "Source and destination slots are the same.")
+            return
+
+        config = self.slot_widgets[from_idx].get_config()
+        config.slot_number = to_idx
+        self.slot_widgets[to_idx].set_config(config)
+        self.tab_widget.setCurrentIndex(to_idx)
+
+        QMessageBox.information(
+            self, "Copy Complete",
+            f"Settings copied from Slot {from_idx + 1} to Slot {to_idx + 1}"
+        )
+
+    def _apply_config(self):
+        """Apply current slot configuration to charger."""
+        if not self.mc3000.is_connected():
+            QMessageBox.warning(self, "Not Connected", "Please connect to the charger first.")
+            return
+
+        current_slot = self.tab_widget.currentIndex()
+        config = self.slot_widgets[current_slot].get_config()
+
+        reply = QMessageBox.question(
+            self, "Confirm Apply",
+            f"Apply configuration to Slot {current_slot + 1}?\n\n"
+            f"Battery: {BATTERY_TYPES.get(config.battery_type, 'Unknown')}\n"
+            f"Mode: {config.get_operation_modes().get(config.operation_mode, 'Unknown')}\n"
+            f"Capacity: {config.capacity_mah} mAh\n"
+            f"Charge Current: {config.charge_current_ma} mA",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            try:
+                fw_version = self.mc3000.firmware_version_int or 123
+                data = config.to_bytes(fw_version)
+                success = self.mc3000.set_slot_config(data)
+                if success:
+                    if self.start_after_apply_cb.isChecked():
+                        if self.mc3000.start_processing():
+                            QMessageBox.information(self, "Success", "Configuration applied and charging started!")
+                        else:
+                            QMessageBox.warning(self, "Partial Success",
+                                "Configuration applied but failed to start charging.")
+                    else:
+                        QMessageBox.information(self, "Success", "Configuration applied successfully!")
+                else:
+                    QMessageBox.warning(self, "Error", "Failed to apply configuration.")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Error applying configuration: {e}")
+
+    # def _read_config(self):
+    #     """Read configuration from charger for current slot."""
+    #     if not self.mc3000.is_connected():
+    #         QMessageBox.warning(self, "Not Connected", "Please connect to the charger first.")
+    #         return
+    #
+    #     current_slot = self.tab_widget.currentIndex()
+    #
+    #     try:
+    #         settings = self.mc3000.get_slot_settings(current_slot)
+    #         if settings:
+    #             self.slot_widgets[current_slot].set_from_slot_settings(settings)
+    #             QMessageBox.information(
+    #                 self, "Read Complete",
+    #                 f"Configuration read from Slot {current_slot + 1}.\n\n"
+    #                 f"Battery: {BATTERY_TYPES.get(settings.battery_type, 'Unknown')}\n"
+    #                 f"Capacity: {settings.capacity_mah} mAh\n"
+    #                 f"Charge Current: {settings.charge_current_ma} mA\n"
+    #                 f"Discharge Current: {settings.discharge_current_ma} mA"
+    #             )
+    #         else:
+    #             QMessageBox.warning(
+    #                 self, "Read Failed",
+    #                 f"Could not read configuration from Slot {current_slot + 1}."
+    #             )
+    #     except Exception as e:
+    #         QMessageBox.critical(self, "Error", f"Error reading configuration: {e}")
+
+    def _read_all_configs(self, show_message: bool = True):
+        """Read configuration from all slots."""
+        if not self.mc3000.is_connected():
+            if show_message:
+                QMessageBox.warning(self, "Not Connected", "Please connect to the charger first.")
+            return
+
+        success_count = 0
+        for i in range(4):
+            try:
+                settings = self.mc3000.get_slot_settings(i)
+                if settings:
+                    self.slot_widgets[i].set_from_slot_settings(settings)
+                    success_count += 1
+            except Exception:
+                pass  # Continue with other slots
+
+        if show_message:
+            if success_count > 0:
+                QMessageBox.information(
+                    self, "Read Complete",
+                    f"Successfully read configuration from {success_count}/4 slots."
+                )
+            else:
+                QMessageBox.warning(self, "Read Failed", "Could not read configuration from any slot.")
+
+    def _load_profile(self):
+        """Load a profile into the current slot."""
+        if not self.profile_manager:
+            return
+
+        dialog = ProfileDialog(self.profile_manager, self)
+        if dialog.exec() == QDialog.Accepted:
+            profile_name = dialog.get_selected_profile()
+            if profile_name:
+                current_slot = self.tab_widget.currentIndex()
+                config = self.profile_manager.profile_to_config(profile_name, current_slot)
+                if config:
+                    self.slot_widgets[current_slot].set_config(config)
+                    QMessageBox.information(
+                        self, "Profile Loaded",
+                        f"Profile '{profile_name}' loaded into Slot {current_slot + 1}"
+                    )
+
+    def _save_profile(self):
+        """Save current slot configuration as a profile."""
+        if not self.profile_manager:
+            return
+
+        current_slot = self.tab_widget.currentIndex()
+        config = self.slot_widgets[current_slot].get_config()
+
+        name, ok = QInputDialog.getText(
+            self, "Save Profile",
+            "Enter a name for this profile:",
+            text=f"My {BATTERY_TYPES.get(config.battery_type, 'Battery')} Profile"
+        )
+
+        if ok and name:
+            # Check if name already exists
+            if self.profile_manager.get_profile(name):
+                if self.profile_manager.is_builtin(name):
+                    QMessageBox.warning(
+                        self, "Cannot Overwrite",
+                        "Cannot overwrite a built-in preset. Please choose a different name."
+                    )
+                    return
+
+                reply = QMessageBox.question(
+                    self, "Overwrite Profile",
+                    f"Profile '{name}' already exists. Overwrite?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+
+            try:
+                self.profile_manager.save_profile(name, config)
+                QMessageBox.information(
+                    self, "Profile Saved",
+                    f"Profile '{name}' saved successfully."
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Save Error",
+                    f"Failed to save profile: {e}"
+                )
+

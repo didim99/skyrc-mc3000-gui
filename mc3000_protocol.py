@@ -1,0 +1,485 @@
+"""
+MC3000 Protocol Constants and Data Parsing
+
+Based on GNU DataExplorer reference implementation by Winfried Bruegmann.
+Protocol constants and data structures for SKYRC MC3000 battery charger.
+"""
+
+from dataclasses import dataclass
+from typing import Optional
+import struct
+
+# USB Device Constants
+VENDOR_ID = 0x0000
+PRODUCT_ID = 0x0001
+INTERFACE_ID = 0x01
+ENDPOINT_IN = 0x81
+ENDPOINT_OUT = 0x01
+DATA_SIZE = 64
+TIMEOUT_MS = 1000
+
+# Battery Types
+BATTERY_TYPES = {
+    0: "LiIon",
+    1: "LiFe",
+    2: "LiHV",
+    3: "NiMH",
+    4: "NiCd",
+    5: "NiZn",
+    6: "Eneloop",
+    7: "RAM",
+}
+
+# Status Codes
+STATUS_CODES = {
+    0: "Standby",
+    1: "Charging",
+    2: "Discharging",
+    3: "Resting",
+    4: "Finished",
+}
+
+# Operation Modes for Li batteries (LiIon, LiFe, LiHV)
+OPERATION_MODES_LI = {
+    0: "Charge",
+    1: "Refresh",
+    2: "Storage",
+    3: "Discharge",
+    4: "Cycle",
+}
+
+# Operation Modes for Ni batteries (NiMH, NiCd, Eneloop)
+OPERATION_MODES_NI = {
+    0: "Charge",
+    1: "Refresh",
+    2: "Break-in",
+    3: "Discharge",
+    4: "Cycle",
+}
+
+# Operation Modes for Zn/RAM batteries (NiZn, RAM)
+OPERATION_MODES_ZN = {
+    0: "Charge",
+    1: "Refresh",
+    2: "Discharge",
+    3: "Cycle",
+}
+
+# Cycle Mode Names
+CYCLE_MODES = {
+    0: "C>D",
+    1: "C>D>C",
+    2: "D>C",
+    3: "D>C>D",
+}
+
+
+def calculate_checksum(buffer: bytes, length: Optional[int] = None) -> int:
+    """
+    Calculate checksum for MC3000 protocol.
+    Checksum is sum of bytes from index 0 to length-2, mod 256.
+    """
+    if length is None:
+        length = len(buffer)
+    return sum(buffer[:length]) % 256
+
+
+def build_command(cmd_byte: int, param1: int = 0x00, param2: int = 0x00) -> bytes:
+    """
+    Build a 64-byte command packet.
+    Format: 0x0F [length] [cmd] [param1] [param2] [checksum] 0xFF 0xFF (padded to 64 bytes)
+    """
+    base_cmd = bytearray([0x0F, 0x04, cmd_byte, param1, param2])
+    checksum = sum(base_cmd[2:]) % 256
+    base_cmd.append(checksum)
+    base_cmd.extend([0xFF, 0xFF])
+    # Pad to 64 bytes
+    base_cmd.extend([0x00] * (DATA_SIZE - len(base_cmd)))
+    return bytes(base_cmd)
+
+
+# Pre-built Commands
+def cmd_query_slot(slot: int) -> bytes:
+    """Query slot settings/configuration for a slot (0-3)."""
+    return build_command(0x5F, 0x00, slot)
+
+
+def cmd_query_slot_settings(slot: int) -> bytes:
+    """Query slot settings/configuration for a slot (0-3). Alias for cmd_query_slot."""
+    return build_command(0x5F, 0x00, slot)
+
+
+def cmd_take_mtu(slot: int) -> bytes:
+    """Take MTU data for a slot (0-3)."""
+    return build_command(0x55, 0x00, slot)
+
+
+def cmd_get_system_settings() -> bytes:
+    """Get system settings."""
+    return build_command(0x5A, 0x00, 0x00)
+
+
+def cmd_start_processing() -> bytes:
+    """Start processing command."""
+    base_cmd = bytearray([0x0F, 0x03, 0x05, 0x00])
+    checksum = sum(base_cmd[2:]) % 256
+    base_cmd.append(checksum)
+    base_cmd.extend([0xFF, 0xFF, 0xFF])
+    base_cmd.extend([0x00] * (DATA_SIZE - len(base_cmd)))
+    return bytes(base_cmd)
+
+
+def cmd_stop_processing() -> bytes:
+    """Stop processing command."""
+    base_cmd = bytearray([0x0F, 0x03, 0xFE, 0x00])
+    checksum = sum(base_cmd[2:]) % 256
+    base_cmd.append(checksum)
+    base_cmd.extend([0xFF, 0xFF, 0xFF])
+    base_cmd.extend([0x00] * (DATA_SIZE - len(base_cmd)))
+    return bytes(base_cmd)
+
+
+def parse_signed_short(high_byte: int, low_byte: int) -> int:
+    """Parse two bytes as a signed 16-bit integer (big-endian in Java code)."""
+    value = (high_byte << 8) | low_byte
+    if value >= 32768:
+        value -= 65536
+    return value
+
+
+@dataclass
+class SlotData:
+    """Parsed data from a single charger slot."""
+    slot_number: int
+    battery_type: int
+    battery_type_name: str
+    operation_mode: int
+    operation_mode_name: str
+    cycle_number: int
+    status: int
+    status_name: str
+    voltage_mv: int
+    current_ma: int
+    capacity_mah: int
+    temperature_c: float
+    resistance_mohm: int
+    system_temp_c: float
+    energy_mwh: int
+    power_mw: int
+    is_error: bool
+    error_code: Optional[int]
+
+    @property
+    def voltage_v(self) -> float:
+        """Voltage in Volts."""
+        return self.voltage_mv / 1000.0
+
+    @property
+    def current_a(self) -> float:
+        """Current in Amps."""
+        return self.current_ma / 1000.0
+
+    @property
+    def power_w(self) -> float:
+        """Power in Watts."""
+        return self.power_mw / 1000.0
+
+    @property
+    def energy_wh(self) -> float:
+        """Energy in Watt-hours."""
+        return self.energy_mwh / 1000.0
+
+
+def get_operation_mode_name(battery_type: int, mode: int) -> str:
+    """Get operation mode name based on battery type."""
+    if battery_type <= 2:  # Li batteries
+        return OPERATION_MODES_LI.get(mode, f"Unknown({mode})")
+    elif battery_type in (3, 4, 6):  # Ni batteries
+        return OPERATION_MODES_NI.get(mode, f"Unknown({mode})")
+    elif battery_type in (5, 7):  # Zn/RAM batteries
+        return OPERATION_MODES_ZN.get(mode, f"Unknown({mode})")
+    return f"Unknown({mode})"
+
+
+def parse_slot_data(data: bytes, slot_number: int) -> Optional[SlotData]:
+    """
+    Parse slot data from a 64-byte response buffer.
+
+    Data format (0-indexed):
+    - Byte 1: Slot number (0-3)
+    - Byte 2: Battery type
+    - Byte 3: Operation mode
+    - Byte 4: Cycle number
+    - Byte 5: Status (0=standby, 1=charge, 2=discharge, 3=resting, 4=finish, 0x80+=error)
+    - Bytes 8-9: Voltage (mV, big-endian signed)
+    - Bytes 10-11: Current (mA, big-endian signed)
+    - Bytes 12-13: Capacity (mAh)
+    - Bytes 14-15: Temperature (0.1°C)
+    - Bytes 16-17: Resistance (mΩ)
+    - Bytes 18-19: System Temperature (0.1°C)
+    - Bytes 20-21: Energy (mWh) - FW 1.05+
+    - Bytes 22-23: Power (mW) - FW 1.05+
+    - Byte 24: Capacity decimal (adds capacity * 0.1) - FW 1.11+
+    """
+    if len(data) < 25:
+        return None
+
+    # Verify this is slot data response (first byte should be 0x0F for query response)
+    # The response format may vary, so we parse based on known offsets
+
+    battery_type = data[2] & 0xFF
+    operation_mode = data[3] & 0xFF
+    cycle_number = data[4] & 0xFF
+    status = data[5] & 0xFF
+
+    # Check for error status
+    is_error = status >= 0x80
+    error_code = status if is_error else None
+
+    # Parse measurements - byte order: first byte is high, second is low
+    voltage_mv = parse_signed_short(data[8], data[9])
+    current_ma = parse_signed_short(data[10], data[11])
+    capacity_mah = parse_signed_short(data[12], data[13])
+    temperature_raw = parse_signed_short(data[14], data[15])
+    resistance_mohm = (data[16] << 8) | data[17]
+    system_temp_raw = parse_signed_short(data[18], data[19])
+    energy_mwh = parse_signed_short(data[20], data[21])
+    power_mw = parse_signed_short(data[22], data[23])
+
+    # Add capacity decimal for FW 1.11+ (byte 24)
+    if len(data) > 24:
+        capacity_decimal = data[24] & 0xFF
+        capacity_mah += int(capacity_decimal * 0.1)
+
+    # Convert temperature (raw is in 0.1°C units)
+    temperature_c = temperature_raw / 10.0
+    system_temp_c = system_temp_raw / 10.0
+
+    # Get status name
+    if is_error:
+        status_name = f"Error(0x{status:02X})"
+    else:
+        status_name = STATUS_CODES.get(status, f"Unknown({status})")
+
+    # Get battery type name
+    battery_type_name = BATTERY_TYPES.get(battery_type, f"Unknown({battery_type})")
+
+    # Get operation mode name
+    operation_mode_name = get_operation_mode_name(battery_type, operation_mode)
+
+    return SlotData(
+        slot_number=slot_number,
+        battery_type=battery_type,
+        battery_type_name=battery_type_name,
+        operation_mode=operation_mode,
+        operation_mode_name=operation_mode_name,
+        cycle_number=cycle_number,
+        status=status,
+        status_name=status_name,
+        voltage_mv=voltage_mv,
+        current_ma=current_ma,
+        capacity_mah=capacity_mah,
+        temperature_c=temperature_c,
+        resistance_mohm=resistance_mohm,
+        system_temp_c=system_temp_c,
+        energy_mwh=energy_mwh,
+        power_mw=power_mw,
+        is_error=is_error,
+        error_code=error_code,
+    )
+
+
+@dataclass
+class SlotSettings:
+    """Parsed slot configuration/settings from MC3000."""
+    slot_number: int
+    is_busy: bool
+    battery_type: int
+    operation_mode: int
+    capacity_mah: int
+    charge_current_ma: int
+    discharge_current_ma: int
+    discharge_cut_voltage_mv: int
+    charge_end_voltage_mv: int
+    charge_end_current_ma: int
+    discharge_reduce_current_ma: int
+    num_cycles: int
+    charge_resting_min: int
+    cycle_mode: int
+    peak_sense_mv: int
+    trickle_current_ma: int
+    restart_voltage_mv: int
+    cut_temperature_c: int
+    cut_time_min: int
+    # FW 1.12+ fields
+    discharge_resting_min: int = 0
+    trickle_time: int = 0
+
+
+def parse_slot_settings(data: bytes, firmware_version: int = 123) -> Optional[SlotSettings]:
+    """
+    Parse slot settings from a 64-byte response buffer (0x5F command response).
+
+    Data format (0-indexed):
+    - Byte 0: 0x5F (command echo)
+    - Byte 1: slot number
+    - Byte 2: busy tag (0x01 = busy)
+    - Byte 3: battery type
+    - Byte 4: operation mode
+    - Bytes 5-6: capacity (mAh)
+    - Bytes 7-8: charge current (mA)
+    - Bytes 9-10: discharge current (mA)
+    - Bytes 11-12: discharge cut voltage (mV)
+    - Bytes 13-14: charge end voltage (mV)
+    - Bytes 15-16: charge end current (mA)
+    - Bytes 17-18: discharge reduce current (mA)
+    - Byte 19: number of cycles
+    - Byte 20: charge resting time (min)
+    - Byte 21: cycle mode
+    - Byte 22: peak sense voltage (mV, for Ni)
+    - Byte 23: trickle current (mA)
+    - Bytes 24-25: restart voltage (mV)
+    - Byte 26: cut temperature (°C)
+    - Bytes 27-28: cut time (min)
+    - Byte 29: temperature unit
+    - Byte 30: trickle time (FW 1.12+)
+    - Byte 31: discharge resting time (FW 1.12+)
+    """
+    if len(data) < 30:
+        return None
+
+    # Verify command echo
+    if data[0] != 0x5F:
+        return None
+
+    def parse_uint16(high: int, low: int) -> int:
+        """Parse 16-bit value from big-endian byte pair."""
+        return (high << 8) | low
+
+    slot_number = data[1]
+    is_busy = data[2] == 0x01
+    battery_type = data[3]
+    operation_mode = data[4]
+    capacity_mah = parse_uint16(data[5], data[6])
+    charge_current_ma = parse_uint16(data[7], data[8])
+    discharge_current_ma = parse_uint16(data[9], data[10])
+    discharge_cut_voltage_mv = parse_uint16(data[11], data[12])
+    charge_end_voltage_mv = parse_uint16(data[13], data[14])
+    charge_end_current_ma = parse_uint16(data[15], data[16])
+    discharge_reduce_current_ma = parse_uint16(data[17], data[18])
+    num_cycles = data[19]
+    charge_resting_min = data[20]
+    cycle_mode = data[21]
+    peak_sense_mv = data[22]
+    trickle_current_ma = data[23]
+    restart_voltage_mv = parse_uint16(data[24], data[25])
+    cut_temperature_c = data[26]
+    cut_time_min = parse_uint16(data[27], data[28])
+
+    # FW 1.12+ fields
+    discharge_resting_min = 0
+    trickle_time = 0
+    if firmware_version > 111 and len(data) > 31:
+        trickle_time = data[30]
+        discharge_resting_min = data[31]
+
+    return SlotSettings(
+        slot_number=slot_number,
+        is_busy=is_busy,
+        battery_type=battery_type,
+        operation_mode=operation_mode,
+        capacity_mah=capacity_mah,
+        charge_current_ma=charge_current_ma,
+        discharge_current_ma=discharge_current_ma,
+        discharge_cut_voltage_mv=discharge_cut_voltage_mv,
+        charge_end_voltage_mv=charge_end_voltage_mv,
+        charge_end_current_ma=charge_end_current_ma,
+        discharge_reduce_current_ma=discharge_reduce_current_ma,
+        num_cycles=num_cycles,
+        charge_resting_min=charge_resting_min,
+        cycle_mode=cycle_mode,
+        peak_sense_mv=peak_sense_mv,
+        trickle_current_ma=trickle_current_ma,
+        restart_voltage_mv=restart_voltage_mv,
+        cut_temperature_c=cut_temperature_c,
+        cut_time_min=cut_time_min,
+        discharge_resting_min=discharge_resting_min,
+        trickle_time=trickle_time,
+    )
+
+
+@dataclass
+class SystemSettings:
+    """Parsed system settings from MC3000."""
+    current_slot_number: int
+    slot_programs: tuple  # (slot1, slot2, slot3, slot4)
+    user_interface_mode: int
+    temperature_unit: int  # 0=Celsius, 1=Fahrenheit
+    beep_tone: int
+    lcd_off_time: int
+    min_voltage: int
+    firmware_major: int
+    firmware_minor: int
+    hardware_version: int
+
+    @property
+    def firmware_version(self) -> str:
+        return f"{self.firmware_major}.{self.firmware_minor:02d}"
+
+    @property
+    def firmware_version_int(self) -> int:
+        return self.firmware_major * 100 + self.firmware_minor
+
+    @property
+    def temperature_unit_str(self) -> str:
+        return "°F" if self.temperature_unit == 1 else "°C"
+
+
+def parse_system_settings(data: bytes) -> Optional[SystemSettings]:
+    """
+    Parse system settings from a 64-byte response buffer.
+
+    Data format (0-indexed):
+    - Byte 2: Current slot number
+    - Byte 3-6: Slot program numbers (1-4)
+    - Byte 7: User interface mode
+    - Byte 8: Temperature unit (0=C, 1=F)
+    - Byte 9: Beep tone
+    - Byte 10-13: Hide flags for battery types
+    - Byte 14: LCD off time
+    - Byte 15: Min voltage
+    - Bytes 16-31: Machine ID (including FW version at 27-28, HW at 29)
+    """
+    if len(data) < 33:
+        return None
+
+    current_slot = data[2] & 0xFF
+    slot_programs = (
+        (data[3] & 0xFF) + 1,
+        (data[4] & 0xFF) + 1,
+        (data[5] & 0xFF) + 1,
+        (data[6] & 0xFF) + 1,
+    )
+    ui_mode = data[7] & 0xFF
+    temp_unit = data[8] & 0xFF
+    beep = data[9] & 0xFF
+    lcd_off = data[14] & 0xFF
+    min_volt = data[15] & 0xFF
+
+    # Firmware version is in machine ID area (bytes 27-28 relative, which is 16+11 and 16+12)
+    fw_major = data[27] & 0xFF
+    fw_minor = data[28] & 0xFF
+    hw_version = data[29] & 0xFF
+
+    return SystemSettings(
+        current_slot_number=current_slot,
+        slot_programs=slot_programs,
+        user_interface_mode=ui_mode,
+        temperature_unit=temp_unit,
+        beep_tone=beep,
+        lcd_off_time=lcd_off,
+        min_voltage=min_volt,
+        firmware_major=fw_major,
+        firmware_minor=fw_minor,
+        hardware_version=hw_version,
+    )
