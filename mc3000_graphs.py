@@ -60,9 +60,8 @@ class SlotDataHistory:
         self.current: deque = deque(maxlen=max_points)
         self.capacity: deque = deque(maxlen=max_points)
         self.temperature: deque = deque(maxlen=max_points)
-        self.resistance: deque = deque(maxlen=max_points)
+        self.internal_temp: deque = deque(maxlen=max_points)
         self.power: deque = deque(maxlen=max_points)
-        self.energy: deque = deque(maxlen=max_points)
         self.start_time: Optional[float] = None
 
     def add_data(self, data: SlotData) -> None:
@@ -77,9 +76,8 @@ class SlotDataHistory:
         self.current.append(data.current_a)
         self.capacity.append(data.capacity_mah)
         self.temperature.append(data.temperature_c)
-        self.resistance.append(data.resistance_mohm)
+        self.internal_temp.append(data.internal_temp_c)
         self.power.append(data.power_w)
-        self.energy.append(data.energy_mwh)
 
     def clear(self) -> None:
         """Clear all stored data."""
@@ -88,9 +86,8 @@ class SlotDataHistory:
         self.current.clear()
         self.capacity.clear()
         self.temperature.clear()
-        self.resistance.clear()
+        self.internal_temp.clear()
         self.power.clear()
-        self.energy.clear()
         self.start_time = None
 
     def get_arrays(self) -> Dict[str, np.ndarray]:
@@ -101,9 +98,8 @@ class SlotDataHistory:
             'current': np.array(self.current),
             'capacity': np.array(self.capacity),
             'temperature': np.array(self.temperature),
-            'resistance': np.array(self.resistance),
+            'internal_temp': np.array(self.internal_temp),
             'power': np.array(self.power),
-            'energy': np.array(self.energy),
         }
 
     def __len__(self) -> int:
@@ -117,10 +113,9 @@ class SlotGraphWidget(QWidget):
         ('voltage', 'Voltage', 'V', (31, 119, 180)),
         ('current', 'Current', 'A', (255, 127, 14)),
         ('capacity', 'Capacity', 'mAh', (44, 160, 44)),
-        ('temperature', 'Temperature', '°C', (214, 39, 40)),
-        ('resistance', 'Resistance', 'mΩ', (148, 103, 189)),
+        ('temperature', 'Batt Temp', '°C', (214, 39, 40)),
+        ('internal_temp', 'Int Temp', '°C', (148, 103, 189)),
         ('power', 'Power', 'W', (140, 86, 75)),
-        ('energy', 'Energy', 'mWh', (227, 119, 194)),
     ]
 
     def __init__(self, slot_number: int, parent: Optional[QWidget] = None):

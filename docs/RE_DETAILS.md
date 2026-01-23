@@ -872,11 +872,14 @@ float input_current_A = total_power_W / input_voltage;
 | 11-12 | Current | mA (BE) |
 | 13-14 | Capacity | mAh (BE) |
 | 15-16 | Batt Temp | 0.1°C (BE, mask 0x7FFF) |
-| 17-18 | Int Temp | 0.1°C (BE) |
-| 19-24 | Reserved | Not parsed |
+| 17-18 | Unknown | MC3000 Monitor shows Int Temp here, but real hardware differs |
+| 19-20 | Int Temp | 0.1°C (BE) - confirmed via DataExplorer/hardware testing |
+| 21-24 | Reserved | Not parsed |
 | 25 | Cap Decimal | 0.01 mAh units |
 | 26-63 | Reserved | |
 | 64 | Checksum | Sum of bytes 1-63 |
+
+**Note:** There is a discrepancy between the MC3000 Monitor binary analysis and actual hardware behavior for bytes 17-18 vs 19-20. The internal temperature reading works correctly from bytes 19-20, suggesting either firmware differences or an error in the MC3000 Monitor software itself.
 
 ### Command Packet (33 bytes, to device)
 

@@ -181,17 +181,14 @@ class SlotData:
     battery_type_name: str
     operation_mode: int
     operation_mode_name: str
-    cycle_number: int
+    work_time_seconds: int  # Time elapsed/remaining in seconds
     status: int
     status_name: str
     voltage_mv: int
     current_ma: int
     capacity_mah: int
-    temperature_c: float
-    resistance_mohm: int
-    system_temp_c: float
-    energy_mwh: int
-    power_mw: int
+    temperature_c: float      # Battery temperature
+    internal_temp_c: float    # Internal/charger temperature
     is_error: bool
     error_code: Optional[int]
 
@@ -207,13 +204,16 @@ class SlotData:
 
     @property
     def power_w(self) -> float:
-        """Power in Watts."""
-        return self.power_mw / 1000.0
+        """Calculated power in Watts (voltage × current)."""
+        return self.voltage_v * self.current_a
 
     @property
-    def energy_wh(self) -> float:
-        """Energy in Watt-hours."""
-        return self.energy_mwh / 1000.0
+    def work_time_formatted(self) -> str:
+        """Work time as HH:MM:SS string."""
+        hours = self.work_time_seconds // 3600
+        minutes = (self.work_time_seconds % 3600) // 60
+        seconds = self.work_time_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def get_operation_mode_name(battery_type: int, mode: int) -> str:
@@ -231,55 +231,62 @@ def parse_slot_data(data: bytes, slot_number: int) -> Optional[SlotData]:
     """
     Parse slot data from a 64-byte response buffer.
 
-    Data format (0-indexed):
+    Protocol based on RE of MC3000_Monitor_V1.06.exe (see docs/RE_DETAILS.md)
+    with corrections from DataExplorer and real hardware testing.
+    Note: hidapi strips Report ID, so offsets are shifted by -1 from raw protocol.
+
+    Data format (0-indexed, after Report ID stripped):
+    - Byte 0: Command echo (0x55)
     - Byte 1: Slot number (0-3)
-    - Byte 2: Battery type
-    - Byte 3: Operation mode
-    - Byte 4: Cycle number
-    - Byte 5: Status (0=standby, 1=charge, 2=discharge, 3=resting, 4=finish, 0x80+=error)
-    - Bytes 8-9: Voltage (mV, big-endian signed)
-    - Bytes 10-11: Current (mA, big-endian signed)
-    - Bytes 12-13: Capacity (mAh)
-    - Bytes 14-15: Temperature (0.1°C)
-    - Bytes 16-17: Resistance (mΩ)
-    - Bytes 18-19: System Temperature (0.1°C)
-    - Bytes 20-21: Energy (mWh) - FW 1.05+
-    - Bytes 22-23: Power (mW) - FW 1.05+
-    - Byte 24: Capacity decimal (adds capacity * 0.1) - FW 1.11+
+    - Byte 2: Battery type (0-6)
+    - Byte 3: Work mode (0-4)
+    - Byte 4: Reserved
+    - Byte 5: Work status (0-4 normal, 0x80+ error)
+    - Bytes 6-7: Work time (seconds, big-endian)
+    - Bytes 8-9: Voltage (mV, big-endian)
+    - Bytes 10-11: Current (mA, big-endian)
+    - Bytes 12-13: Capacity (mAh, big-endian)
+    - Bytes 14-15: Battery temperature (0.1°C, big-endian, masked with 0x7FFF)
+    - Bytes 16-17: Unknown (RE_DETAILS says Int Temp, but hardware shows different)
+    - Bytes 18-19: Internal/charger temperature (0.1°C, big-endian)
+    - Bytes 20-23: Reserved
+    - Byte 24: Capacity decimal (0.01 mAh units)
     """
     if len(data) < 25:
         return None
 
-    # Verify this is slot data response (first byte should be 0x0F for query response)
-    # The response format may vary, so we parse based on known offsets
-
     battery_type = data[2] & 0xFF
     operation_mode = data[3] & 0xFF
-    cycle_number = data[4] & 0xFF
+    # Byte 4 is Reserved per MC3000 Monitor protocol
     status = data[5] & 0xFF
 
     # Check for error status
     is_error = status >= 0x80
     error_code = status if is_error else None
 
+    # Work time in seconds (bytes 6-7, big-endian)
+    work_time_seconds = (data[6] << 8) | data[7]
+
     # Parse measurements - byte order: first byte is high, second is low
     voltage_mv = parse_signed_short(data[8], data[9])
     current_ma = parse_signed_short(data[10], data[11])
     capacity_mah = parse_signed_short(data[12], data[13])
-    temperature_raw = parse_signed_short(data[14], data[15])
-    resistance_mohm = (data[16] << 8) | data[17]
-    system_temp_raw = parse_signed_short(data[18], data[19])
-    energy_mwh = parse_signed_short(data[20], data[21])
-    power_mw = parse_signed_short(data[22], data[23])
 
-    # Add capacity decimal for FW 1.11+ (byte 24)
+    # Battery temperature with 0x7FFF mask (high bit may be a flag)
+    batt_temp_raw = parse_signed_short(data[14], data[15]) & 0x7FFF
+    # Internal/charger temperature (bytes 18-19)
+    # Note: RE_DETAILS says 16-17, but DataExplorer and real hardware testing shows 18-19
+    internal_temp_raw = parse_signed_short(data[18], data[19])
+
+    # Capacity decimal (byte 24, 0.01 mAh units per RE_DETAILS)
     if len(data) > 24:
         capacity_decimal = data[24] & 0xFF
-        capacity_mah += int(capacity_decimal * 0.1)
+        # Add decimal portion: value is in 0.01 mAh units
+        capacity_mah += int(capacity_decimal * 0.01)
 
-    # Convert temperature (raw is in 0.1°C units)
-    temperature_c = temperature_raw / 10.0
-    system_temp_c = system_temp_raw / 10.0
+    # Convert temperatures (raw is in 0.1°C units)
+    temperature_c = batt_temp_raw / 10.0
+    internal_temp_c = internal_temp_raw / 10.0
 
     # Get status name
     if is_error:
@@ -303,17 +310,14 @@ def parse_slot_data(data: bytes, slot_number: int) -> Optional[SlotData]:
         battery_type_name=battery_type_name,
         operation_mode=operation_mode,
         operation_mode_name=operation_mode_name,
-        cycle_number=cycle_number,
+        work_time_seconds=work_time_seconds,
         status=status,
         status_name=status_name,
         voltage_mv=voltage_mv,
         current_ma=current_ma,
         capacity_mah=capacity_mah,
         temperature_c=temperature_c,
-        resistance_mohm=resistance_mohm,
-        system_temp_c=system_temp_c,
-        energy_mwh=energy_mwh,
-        power_mw=power_mw,
+        internal_temp_c=internal_temp_c,
         is_error=is_error,
         error_code=error_code,
     )

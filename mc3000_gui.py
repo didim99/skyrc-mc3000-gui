@@ -129,9 +129,8 @@ class SlotWidget(QGroupBox):
         self.current_label = self._create_value_label()
         self.capacity_label = self._create_value_label()
         self.temperature_label = self._create_value_label()
-        self.resistance_label = self._create_value_label()
         self.power_label = self._create_value_label()
-        self.energy_label = self._create_value_label()
+        self.time_label = self._create_value_label()
 
         row = 0
         measurements_layout.addWidget(QLabel("Voltage:"), row, 0)
@@ -150,23 +149,14 @@ class SlotWidget(QGroupBox):
         measurements_layout.addWidget(self.temperature_label, row, 1)
 
         row += 1
-        measurements_layout.addWidget(QLabel("Resistance:"), row, 0)
-        measurements_layout.addWidget(self.resistance_label, row, 1)
-
-        row += 1
         measurements_layout.addWidget(QLabel("Power:"), row, 0)
         measurements_layout.addWidget(self.power_label, row, 1)
 
         row += 1
-        measurements_layout.addWidget(QLabel("Energy:"), row, 0)
-        measurements_layout.addWidget(self.energy_label, row, 1)
+        measurements_layout.addWidget(QLabel("Time:"), row, 0)
+        measurements_layout.addWidget(self.time_label, row, 1)
 
         layout.addLayout(measurements_layout)
-
-        # Cycle info
-        self.cycle_label = QLabel("")
-        self.cycle_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.cycle_label)
 
         layout.addStretch()
 
@@ -215,18 +205,8 @@ class SlotWidget(QGroupBox):
         self.current_label.setText(f"{data.current_a:+.3f} A")
         self.capacity_label.setText(f"{data.capacity_mah} mAh")
         self.temperature_label.setText(f"{data.temperature_c:.1f} \u00b0C")
-        if data.resistance_mohm == 0xFFFF:
-            self.resistance_label.setText("--- m\u03a9")
-        else:
-            self.resistance_label.setText(f"{data.resistance_mohm} m\u03a9")
         self.power_label.setText(f"{data.power_w:.2f} W")
-        self.energy_label.setText(f"{data.energy_mwh} mWh")
-
-        # Update cycle info if in cycle mode
-        if data.cycle_number > 0:
-            self.cycle_label.setText(f"Cycle {data.cycle_number}")
-        else:
-            self.cycle_label.setText("")
+        self.time_label.setText(data.work_time_formatted)
 
     def clear_data(self):
         """Clear all displayed data."""
@@ -241,10 +221,8 @@ class SlotWidget(QGroupBox):
         self.current_label.setText("--- A")
         self.capacity_label.setText("--- mAh")
         self.temperature_label.setText("--- \u00b0C")
-        self.resistance_label.setText("--- m\u03a9")
         self.power_label.setText("--- W")
-        self.energy_label.setText("--- mWh")
-        self.cycle_label.setText("")
+        self.time_label.setText("--:--:--")
 
 
 class MainWindow(QMainWindow):
@@ -473,18 +451,18 @@ class MainWindow(QMainWindow):
 
         try:
             # Query all slots
-            system_temp_c = None
+            internal_temp_c = None
             for i, slot_widget in enumerate(self.slot_widgets):
                 data = self.mc3000.get_slot_data(i)
                 slot_widget.update_data(data)
-                if data and system_temp_c is None:
-                    system_temp_c = data.system_temp_c
+                if data and internal_temp_c is None:
+                    internal_temp_c = data.internal_temp_c
 
                 # Update graphs if available
                 if self.graph_widget and data:
                     self.graph_widget.update_data(i, data)
-            if system_temp_c is not None:
-                self.firmware_label.setText(f"System Temp: {system_temp_c:.1f} \u00b0C")
+            if internal_temp_c is not None:
+                self.firmware_label.setText(f"Charger Temp: {internal_temp_c:.1f} \u00b0C")
             else:
                 self.firmware_label.setText("")
 
