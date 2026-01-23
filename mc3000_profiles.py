@@ -17,8 +17,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 
-from mc3000_config import SlotConfig
-
 # Default profiles directory
 def get_profiles_dir() -> Path:
     """Get the profiles directory, creating it if needed."""
@@ -291,7 +289,7 @@ class ProfileManager:
             return BUILTIN_PRESETS[name]
         return None
 
-    def save_profile(self, name: str, config: SlotConfig):
+    def save_profile(self, name: str, config):
         """Save a configuration as a profile."""
         self.profiles[name] = {
             "battery_type": config.battery_type,
@@ -324,8 +322,9 @@ class ProfileManager:
         """Check if a profile is built-in."""
         return name in BUILTIN_PRESETS
 
-    def profile_to_config(self, name: str, slot_number: int = 0) -> Optional[SlotConfig]:
+    def profile_to_config(self, name: str, slot_number: int = 0):
         """Convert a profile to a SlotConfig."""
+        from mc3000_config import SlotConfig
         profile = self.get_profile(name)
         if not profile:
             return None

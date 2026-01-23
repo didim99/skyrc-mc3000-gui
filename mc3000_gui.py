@@ -5,7 +5,7 @@ PySide6-based graphical user interface for SKYRC MC3000 battery charger.
 Provides real-time monitoring of all 4 charging slots.
 """
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 import sys
 import logging
@@ -104,6 +104,16 @@ class SlotWidget(QGroupBox):
         self.status_label.setFont(status_font)
         layout.addWidget(self.status_label)
 
+        # Hint label (shown when finished)
+        self.hint_label = QLabel("Press slot button to restart")
+        self.hint_label.setAlignment(Qt.AlignCenter)
+        hint_font = QFont()
+        hint_font.setPointSize(8)
+        self.hint_label.setFont(hint_font)
+        self.hint_label.setStyleSheet("color: gray;")
+        self.hint_label.hide()
+        layout.addWidget(self.hint_label)
+
         # Separator
         line = QFrame()
         line.setFrameShape(QFrame.HLine)
@@ -186,6 +196,12 @@ class SlotWidget(QGroupBox):
         # Update status
         self.status_label.setText(data.status_name)
 
+        # Show hint when finished
+        if data.status == 4:  # Finished
+            self.hint_label.show()
+        else:
+            self.hint_label.hide()
+
         # Update status color
         if data.is_error:
             color = ERROR_COLOR
@@ -219,6 +235,7 @@ class SlotWidget(QGroupBox):
         self.status_label.setText("Standby")
         self.status_label.setStyleSheet(f"color: {STATUS_COLORS[0]};")
         self.status_frame.setStyleSheet(f"background-color: {STATUS_COLORS[0]};")
+        self.hint_label.hide()
 
         self.voltage_label.setText("--- V")
         self.current_label.setText("--- A")

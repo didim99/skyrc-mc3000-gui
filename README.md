@@ -16,6 +16,14 @@ Cross-platform Python GUI for monitoring and controlling the SKYRC MC3000 batter
 - Color-coded status indicators
 - Cross-platform (Windows, macOS, Linux)
 
+## Screenshots
+
+![Charging Mode](screenshots/charger1.png)
+*Real-time monitoring with voltage graphs during charging*
+
+![Refresh Mode](screenshots/charger2.png)
+*Discharge curves during refresh/analyze mode*
+
 ## Installation
 
 ### From PyPI
@@ -155,6 +163,11 @@ pip install -e ".[dev]"
 ```bash
 pytest
 ```
+
+## Known Limitations
+
+- **Starting after "Finished"**: When a slot completes charging, you may need to press a button on the charger to clear the finished state before starting a new operation via USB.
+- See [Protocol Notes](docs/protocol_notes.md) for more details.
 
 ## License
 

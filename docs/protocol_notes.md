@@ -52,3 +52,24 @@ struct, then appending a `machine_id` to build the final `MachineInfo`.
   1-63 and comparing to byte 64.
 - The blog shows a slot-current example: `Current = inPacket[11] * 256 + inPacket[12]`.
 - Response dispatch in the original app checks `inPacket[1]` for the opcode.
+
+## Known Limitations
+
+### Starting New Operation After "Finished" State
+When a slot completes an operation (status = "Finished"), the USB `start_processing`
+command (0x05) may not work to start a new operation. The charger appears to require
+physical button interaction to clear the "Finished" state before accepting a new
+USB start command.
+
+**Workaround:** Press any button on the charger to clear the finished slot, then use
+the GUI to apply new settings and start.
+
+### Global Stop Command Reboots Charger
+The `stop_processing` command (0xFE) is a global command that stops all slots and
+may cause the charger to reboot/reset. There is no known per-slot stop command
+via USB. Avoid using the stop command programmatically.
+
+### Start Command is Global
+The `start_processing` command (0x05) starts all slots that are in "Standby" state.
+There is no per-slot start command - the charger handles slot selection internally
+based on which slots have batteries inserted and are configured.

@@ -207,6 +207,17 @@ class SlotConfigWidget(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
+        # Quick profile selector
+        if PROFILES_AVAILABLE:
+            profile_layout = QHBoxLayout()
+            profile_layout.addWidget(QLabel("Quick Profile:"))
+            self.profile_combo = QComboBox()
+            self.profile_combo.addItem("-- Select Profile --", None)
+            self._populate_profiles()
+            self.profile_combo.currentIndexChanged.connect(self._on_profile_selected)
+            profile_layout.addWidget(self.profile_combo, 1)
+            layout.addLayout(profile_layout)
+
         # Battery type and mode
         type_group = QGroupBox("Battery Settings")
         type_layout = QFormLayout(type_group)
@@ -415,6 +426,39 @@ class SlotConfigWidget(QWidget):
         self.cut_temp_spin.setValue(settings.cut_temperature_c)
         self.cut_time_spin.setValue(settings.cut_time_min)
 
+    def _populate_profiles(self):
+        """Populate the profile combo box."""
+        if not PROFILES_AVAILABLE:
+            return
+        from mc3000_profiles import ProfileManager, BUILTIN_PRESETS
+        pm = ProfileManager()
+        # Add built-in profiles
+        for name in sorted(BUILTIN_PRESETS.keys()):
+            self.profile_combo.addItem(name, name)
+        # Add user profiles
+        user_profiles = pm.get_user_profiles()
+        if user_profiles:
+            self.profile_combo.insertSeparator(self.profile_combo.count())
+            for name in sorted(user_profiles.keys()):
+                self.profile_combo.addItem(f"* {name}", name)
+
+    def _on_profile_selected(self, index):
+        """Handle profile selection from combo box."""
+        if not PROFILES_AVAILABLE or index <= 0:
+            return
+        profile_name = self.profile_combo.currentData()
+        if not profile_name:
+            return
+        from mc3000_profiles import ProfileManager
+        pm = ProfileManager()
+        config = pm.profile_to_config(profile_name, self.slot_number)
+        if config:
+            self.set_config(config)
+        # Reset combo to "Select Profile" after applying
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.setCurrentIndex(0)
+        self.profile_combo.blockSignals(False)
+
 
 class SlotConfigDialog(QDialog):
     """Dialog for configuring charger slots."""
@@ -470,13 +514,13 @@ class SlotConfigDialog(QDialog):
             profile_group = QGroupBox("Profiles")
             profile_layout = QHBoxLayout(profile_group)
 
-            self.load_profile_btn = QPushButton("Load Profile...")
-            self.load_profile_btn.clicked.connect(self._load_profile)
-            profile_layout.addWidget(self.load_profile_btn)
-
-            self.save_profile_btn = QPushButton("Save as Profile...")
+            self.save_profile_btn = QPushButton("Save Current as Profile...")
             self.save_profile_btn.clicked.connect(self._save_profile)
             profile_layout.addWidget(self.save_profile_btn)
+
+            self.manage_profiles_btn = QPushButton("Manage Profiles...")
+            self.manage_profiles_btn.clicked.connect(self._manage_profiles)
+            profile_layout.addWidget(self.manage_profiles_btn)
 
             profile_layout.addStretch()
             layout.addWidget(profile_group)
@@ -502,6 +546,29 @@ class SlotConfigDialog(QDialog):
         button_layout.addWidget(close_btn)
 
         layout.addLayout(button_layout)
+
+    def _refresh_profile_combos(self):
+        """Refresh profile combo boxes in all slot widgets."""
+        if not PROFILES_AVAILABLE:
+            return
+        from mc3000_profiles import ProfileManager, BUILTIN_PRESETS
+        pm = ProfileManager()
+        user_profiles = pm.get_user_profiles()
+
+        for widget in self.slot_widgets:
+            if hasattr(widget, 'profile_combo'):
+                widget.profile_combo.blockSignals(True)
+                widget.profile_combo.clear()
+                widget.profile_combo.addItem("-- Select Profile --", None)
+                # Add built-in profiles
+                for name in sorted(BUILTIN_PRESETS.keys()):
+                    widget.profile_combo.addItem(name, name)
+                # Add user profiles
+                if user_profiles:
+                    widget.profile_combo.insertSeparator(widget.profile_combo.count())
+                    for name in sorted(user_profiles.keys()):
+                        widget.profile_combo.addItem(f"* {name}", name)
+                widget.profile_combo.blockSignals(False)
 
     def _copy_settings(self):
         """Copy settings from one slot to another."""
@@ -614,23 +681,22 @@ class SlotConfigDialog(QDialog):
             else:
                 QMessageBox.warning(self, "Read Failed", "Could not read configuration from any slot.")
 
-    def _load_profile(self):
-        """Load a profile into the current slot."""
+    def _manage_profiles(self):
+        """Open profile management dialog."""
         if not self.profile_manager:
             return
 
         dialog = ProfileDialog(self.profile_manager, self)
-        if dialog.exec() == QDialog.Accepted:
+        result = dialog.exec()
+        # Refresh combos in case profiles were deleted
+        self._refresh_profile_combos()
+        if result == QDialog.Accepted:
             profile_name = dialog.get_selected_profile()
             if profile_name:
                 current_slot = self.tab_widget.currentIndex()
                 config = self.profile_manager.profile_to_config(profile_name, current_slot)
                 if config:
                     self.slot_widgets[current_slot].set_config(config)
-                    QMessageBox.information(
-                        self, "Profile Loaded",
-                        f"Profile '{profile_name}' loaded into Slot {current_slot + 1}"
-                    )
 
     def _save_profile(self):
         """Save current slot configuration as a profile."""
@@ -666,6 +732,7 @@ class SlotConfigDialog(QDialog):
 
             try:
                 self.profile_manager.save_profile(name, config)
+                self._refresh_profile_combos()
                 QMessageBox.information(
                     self, "Profile Saved",
                     f"Profile '{name}' saved successfully."
