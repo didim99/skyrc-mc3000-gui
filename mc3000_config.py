@@ -528,9 +528,6 @@ class SlotConfigDialog(QDialog):
         # Buttons
         button_layout = QHBoxLayout()
 
-        self.start_after_apply_cb = QCheckBox("Start after apply")
-        button_layout.addWidget(self.start_after_apply_cb)
-
         self.apply_btn = QPushButton("Apply to Charger")
         self.apply_btn.clicked.connect(self._apply_config)
         button_layout.addWidget(self.apply_btn)
@@ -614,14 +611,7 @@ class SlotConfigDialog(QDialog):
                 data = config.to_bytes(fw_version)
                 success = self.mc3000.set_slot_config(data)
                 if success:
-                    if self.start_after_apply_cb.isChecked():
-                        if self.mc3000.start_processing():
-                            QMessageBox.information(self, "Success", "Configuration applied and charging started!")
-                        else:
-                            QMessageBox.warning(self, "Partial Success",
-                                "Configuration applied but failed to start charging.")
-                    else:
-                        QMessageBox.information(self, "Success", "Configuration applied successfully!")
+                    QMessageBox.information(self, "Success", "Configuration applied successfully!")
                 else:
                     QMessageBox.warning(self, "Error", "Failed to apply configuration.")
             except Exception as e:
@@ -742,4 +732,3 @@ class SlotConfigDialog(QDialog):
                     self, "Save Error",
                     f"Failed to save profile: {e}"
                 )
-

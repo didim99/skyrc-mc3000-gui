@@ -266,6 +266,12 @@ class MainWindow(QMainWindow):
         self.system_settings_btn.setFixedWidth(140)
         header_layout.addWidget(self.system_settings_btn)
 
+        self.start_btn = QPushButton("Start")
+        self.start_btn.clicked.connect(self._on_start_clicked)
+        self.start_btn.setEnabled(False)
+        self.start_btn.setFixedWidth(80)
+        header_layout.addWidget(self.start_btn)
+
         header_layout.addStretch()
 
         # Show/hide graphs checkbox
@@ -347,6 +353,28 @@ class MainWindow(QMainWindow):
             dialog = SystemSettingsDialog(self.mc3000, self)
             dialog.exec()
 
+    def _on_start_clicked(self):
+        """Start charger processing for all configured slots."""
+        if not self.mc3000.is_connected():
+            QMessageBox.warning(self, "Not Connected", "Please connect to the charger first.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Start Charger",
+            "Start charging now?\n\n"
+            "This starts all slots that are configured and in standby.\n"
+            "Make sure you have applied the desired slot configuration first.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if self.mc3000.start_processing():
+            self.status_bar.showMessage("Start command sent")
+        else:
+            QMessageBox.warning(self, "Start Failed", "Failed to start charging.")
+
     def _check_hid_available(self) -> bool:
         """Check if HID library is available and show warning if not."""
         if not MC3000USB.check_hid_available():
@@ -391,6 +419,8 @@ class MainWindow(QMainWindow):
                 self.config_btn.setEnabled(True)
             if hasattr(self, 'system_settings_btn'):
                 self.system_settings_btn.setEnabled(True)
+            if hasattr(self, 'start_btn'):
+                self.start_btn.setEnabled(True)
 
             self.firmware_label.setText("")
 
@@ -434,6 +464,8 @@ class MainWindow(QMainWindow):
             self.config_btn.setEnabled(False)
         if hasattr(self, 'system_settings_btn'):
             self.system_settings_btn.setEnabled(False)
+        if hasattr(self, 'start_btn'):
+            self.start_btn.setEnabled(False)
         self.firmware_label.setText("")
 
         # Clear slot displays
@@ -452,17 +484,22 @@ class MainWindow(QMainWindow):
         try:
             # Query all slots
             internal_temp_c = None
+            total_power_w = 0.0
             for i, slot_widget in enumerate(self.slot_widgets):
                 data = self.mc3000.get_slot_data(i)
                 slot_widget.update_data(data)
-                if data and internal_temp_c is None:
-                    internal_temp_c = data.internal_temp_c
+                if data:
+                    if internal_temp_c is None:
+                        internal_temp_c = data.internal_temp_c
+                    total_power_w += abs(data.power_w)
 
                 # Update graphs if available
                 if self.graph_widget and data:
                     self.graph_widget.update_data(i, data)
             if internal_temp_c is not None:
-                self.firmware_label.setText(f"Charger Temp: {internal_temp_c:.1f} \u00b0C")
+                self.firmware_label.setText(
+                    f"Charger Temp: {internal_temp_c:.1f} \u00b0C    |    Total Power: {total_power_w:.2f} W"
+                )
             else:
                 self.firmware_label.setText("")
 
@@ -524,6 +561,12 @@ class SystemSettingsDialog(QDialog):
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self._refresh_settings)
         button_layout.addWidget(self.refresh_btn)
+
+        self.stop_btn = QPushButton("Stop All Slots")
+        self.stop_btn.clicked.connect(self._stop_processing)
+        self.stop_btn.setStyleSheet("QPushButton { color: #CC0000; }")
+        button_layout.addWidget(self.stop_btn)
+
         button_layout.addStretch()
         self.close_btn = QPushButton("Close")
         self.close_btn.clicked.connect(self.accept)
@@ -576,6 +619,26 @@ class SystemSettingsDialog(QDialog):
         slot_programs = ", ".join(str(p) for p in settings.slot_programs)
         self._set_label_text(self.slot_programs_label, slot_programs)
         self._set_label_text(self.min_voltage_label, str(settings.min_voltage))
+
+    def _stop_processing(self):
+        """Stop processing on all slots."""
+        if not self.mc3000.is_connected():
+            QMessageBox.warning(self, "Not Connected", "Connect to the MC3000 first.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Stop All Slots",
+            "Stop charging/discharging on all slots?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        if self.mc3000.stop_processing():
+            QMessageBox.information(self, "Stopped", "Stop command sent to charger.")
+        else:
+            QMessageBox.warning(self, "Stop Failed", "Failed to send stop command.")
 
 
 def create_udev_rules_message() -> str:
