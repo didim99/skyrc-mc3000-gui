@@ -31,6 +31,7 @@ from mc3000_protocol import (
     parse_slot_data,
     parse_system_settings,
     parse_slot_settings,
+    get_error_description,
     SlotData,
     SlotSettings,
     SystemSettings,
@@ -446,13 +447,30 @@ class MC3000USB:
             self._send_command(config_data)
             time.sleep(0.02)  # Wait for device to process
 
-            response = self._read_response()
-            if response and (response[0] & 0xFF) == 0xF0:
-                logger.info("Slot configuration applied successfully")
-                return True
-            else:
-                logger.warning(f"Slot config rejected, response: {response[0] if response else 'None'}")
+            # Poll for config ACK, ignoring interleaved status packets (0x55)
+            deadline = time.time() + 0.5
+            while time.time() < deadline:
+                response = self._read_response(timeout_ms=100)
+                if not response:
+                    continue
+                code = response[0] & 0xFF
+                if code == 0x55:
+                    continue
+                if code == 0xF0:
+                    logger.info("Slot configuration applied successfully")
+                    return True
+                if code >= 0x80:
+                    logger.warning(
+                        "Slot config rejected, response: %d (%s)",
+                        code,
+                        get_error_description(code),
+                    )
+                    return False
+                logger.warning("Slot config rejected, response: %d", code)
                 return False
+
+            logger.warning("Slot config rejected, response: None (timeout)")
+            return False
         except Exception as e:
             logger.error(f"Error setting slot config: {e}")
             return False
