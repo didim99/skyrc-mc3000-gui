@@ -169,6 +169,17 @@ pytest
 - **Starting after "Finished"**: When a slot completes charging, you may need to press a button on the charger to clear the finished state before starting a new operation via USB.
 - See [Protocol Notes](docs/protocol_notes.md) for more details.
 
+## Firmware Updates (Linux)
+
+The official SKYRC firmware update tool (`MC3000_Firmware_Update__V1.25.exe`) is a Windows application. However, Linux users have reported success running it under Wine with .NET Framework 4.5.2 installed:
+
+```bash
+winetricks dotnet452
+wine MC3000_Firmware_Update__V1.25.exe
+```
+
+**Warning:** Firmware updates carry inherent risk. Proceed at your own discretion. Results may vary depending on your Wine configuration and system setup.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.

@@ -39,6 +39,32 @@ STATUS_CODES = {
     4: "Finished",
 }
 
+# Error Codes (status >= 0x80)
+# Extracted from MC3000_Monitor_V1.06.exe via reverse engineering (see docs/RE_DETAILS.md)
+ERROR_CODES = {
+    0x80: "Input Low",           # Input voltage too low
+    0x81: "Input High",          # Input voltage too high
+    0x82: "MCP3424-1 Error",     # ADC chip 1 error
+    0x83: "MCP3424-2 Error",     # ADC chip 2 error
+    0x84: "Battery Break",       # Battery connection lost
+    0x85: "Check Battery",       # Battery check failed
+    0x86: "Capacity Cut",        # Capacity limit reached
+    0x87: "Time Cut",            # Time limit reached
+    0x88: "Int. Temp High",      # Internal temperature too high
+    0x89: "Batt. Temp High",     # Battery temperature too high
+    0x8A: "Over Load",           # Overload condition
+    0x8B: "Batt. Reverse",       # Battery inserted backwards
+    0x8C: "Unknown Error",       # Unknown error (AnKnow Error in original)
+}
+
+
+def get_error_description(error_code: int) -> str:
+    """Get human-readable description for an error code."""
+    if error_code < 0x80:
+        return ""
+    return ERROR_CODES.get(error_code, f"Unknown Error (0x{error_code:02X})")
+
+
 # Operation Modes for Li batteries (LiIon, LiFe, LiHV)
 OPERATION_MODES_LI = {
     0: "Charge",
@@ -257,7 +283,11 @@ def parse_slot_data(data: bytes, slot_number: int) -> Optional[SlotData]:
 
     # Get status name
     if is_error:
-        status_name = f"Error(0x{status:02X})"
+        error_desc = ERROR_CODES.get(status, None)
+        if error_desc:
+            status_name = error_desc
+        else:
+            status_name = f"Error (0x{status:02X})"
     else:
         status_name = STATUS_CODES.get(status, f"Unknown({status})")
 
