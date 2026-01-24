@@ -18,6 +18,13 @@ ENDPOINT_OUT = 0x01
 DATA_SIZE = 64
 TIMEOUT_MS = 1000
 
+# BLE Constants
+# BLE uses 20-byte packets (default ATT MTU) with checksum at byte 19
+BLE_PACKET_SIZE = 20
+BLE_SERVICE_UUID = "0000ffe0-0000-1000-8000-00805f9b34fb"
+BLE_CHARACTERISTIC_UUID = "0000ffe1-0000-1000-8000-00805f9b34fb"
+BLE_DEVICE_NAMES = ("SimpleBLEPeripheral", "Charger", "HitecCharger")
+
 # Battery Types
 BATTERY_TYPES = {
     0: "LiIon",
@@ -513,6 +520,238 @@ def parse_system_settings(data: bytes) -> Optional[SystemSettings]:
         beep_tone=beep,
         lcd_off_time=lcd_off,
         min_voltage=min_volt,
+        firmware_major=fw_major,
+        firmware_minor=fw_minor,
+        hardware_version=hw_version,
+    )
+
+
+# =============================================================================
+# BLE Protocol Functions
+# =============================================================================
+
+
+def build_ble_command(cmd: int, channel: int = 0, channel_mask: int = 0) -> bytes:
+    """
+    Build a 20-byte BLE command packet.
+
+    Args:
+        cmd: Command byte (0x55 for slot data, 0x57 for version, 0x61 for basic data)
+        channel: Channel number (0-3) for 0x55 command
+        channel_mask: Channel bitmask for other commands
+
+    Returns:
+        20-byte command packet with checksum at byte 19
+    """
+    buf = bytearray(BLE_PACKET_SIZE)  # 20 bytes
+    buf[0] = 0x0F  # Start byte
+    buf[1] = cmd   # Command
+    if cmd == 0x55:
+        buf[2] = channel
+    else:
+        buf[2] = channel_mask
+    # Checksum is sum of bytes 0..18, masked to 0xFF, stored at byte 19
+    buf[19] = sum(buf[:19]) % 256
+    return bytes(buf)
+
+
+def cmd_ble_take_mtu(slot: int) -> bytes:
+    """Build BLE command to query slot data (0x55)."""
+    return build_ble_command(0x55, channel=slot)
+
+
+def cmd_ble_get_version() -> bytes:
+    """Build BLE command to get version info (0x57)."""
+    return build_ble_command(0x57)
+
+
+def cmd_ble_get_basic_data(channel_mask: int = 0x0F) -> bytes:
+    """Build BLE command to get basic system data (0x61)."""
+    return build_ble_command(0x61, channel_mask=channel_mask)
+
+
+def parse_ble_slot_data(data: bytes, slot_number: int) -> Optional[SlotData]:
+    """
+    Parse BLE slot data from a 20-byte response.
+
+    BLE Slot Data Format (0-indexed, 20 bytes total):
+    - Byte 0: 0x0F (start byte)
+    - Byte 1: 0x55 (command echo)
+    - Byte 2: channel (0-3)
+    - Byte 3: battery type
+    - Byte 4: mode
+    - Byte 5: cycle count
+    - Byte 6: status
+    - Bytes 7-8: time (seconds, big-endian)
+    - Bytes 9-10: voltage (mV, big-endian)
+    - Bytes 11-12: current (mA, big-endian, signed)
+    - Bytes 13-14: capacity (mAh, big-endian)
+    - Byte 15: temperature (integer in current unit)
+    - Bytes 16-17: internal resistance (mOhm, big-endian)
+    - Byte 18: LED bitmask
+    - Byte 19: checksum
+
+    Args:
+        data: 20-byte response from BLE device
+        slot_number: Slot number (0-3)
+
+    Returns:
+        SlotData object or None on failure
+    """
+    if len(data) < BLE_PACKET_SIZE:
+        return None
+
+    # Verify start byte and command
+    if data[0] != 0x0F or data[1] != 0x55:
+        return None
+
+    # Verify checksum (sum of bytes 0..18 mod 256)
+    expected_checksum = sum(data[:19]) % 256
+    if data[19] != expected_checksum:
+        return None
+
+    battery_type = data[3] & 0xFF
+    operation_mode = data[4] & 0xFF
+    # cycle_count = data[5] & 0xFF  # Available but not used in SlotData
+    status = data[6] & 0xFF
+
+    # Check for error status
+    is_error = status >= 0x80
+    error_code = status if is_error else None
+
+    # Work time in seconds (bytes 7-8, big-endian)
+    work_time_seconds = (data[7] << 8) | data[8]
+
+    # Voltage in mV (bytes 9-10, big-endian)
+    voltage_mv = (data[9] << 8) | data[10]
+
+    # Current in mA (bytes 11-12, big-endian, signed)
+    current_ma = parse_signed_short(data[11], data[12])
+
+    # Capacity in mAh (bytes 13-14, big-endian)
+    capacity_mah = (data[13] << 8) | data[14]
+
+    # Temperature in integer (byte 15)
+    temperature_c = float(data[15] & 0xFF)
+
+    # Internal resistance in mOhm (bytes 16-17)
+    # internal_resistance = (data[16] << 8) | data[17]
+
+    # Get status name
+    if is_error:
+        error_desc = ERROR_CODES.get(status, None)
+        if error_desc:
+            status_name = error_desc
+        else:
+            status_name = f"Error (0x{status:02X})"
+    else:
+        status_name = STATUS_CODES.get(status, f"Unknown({status})")
+
+    # Get battery type name
+    battery_type_name = BATTERY_TYPES.get(battery_type, f"Unknown({battery_type})")
+
+    # Get operation mode name
+    operation_mode_name = get_operation_mode_name(battery_type, operation_mode)
+
+    return SlotData(
+        slot_number=slot_number,
+        battery_type=battery_type,
+        battery_type_name=battery_type_name,
+        operation_mode=operation_mode,
+        operation_mode_name=operation_mode_name,
+        work_time_seconds=work_time_seconds,
+        status=status,
+        status_name=status_name,
+        voltage_mv=voltage_mv,
+        current_ma=current_ma,
+        capacity_mah=capacity_mah,
+        temperature_c=temperature_c,
+        internal_temp_c=temperature_c,  # BLE doesn't provide separate internal temp
+        is_error=is_error,
+        error_code=error_code,
+    )
+
+
+@dataclass
+class BLEBasicData:
+    """Parsed basic data from BLE 0x61 command response."""
+    channel_status: tuple  # Status for each channel (4 values)
+    firmware_version: str
+    hardware_version: int
+
+
+def parse_ble_basic_data(data: bytes) -> Optional[BLEBasicData]:
+    """
+    Parse BLE basic data from 0x61 command response.
+
+    Format is device-specific and may vary.
+
+    Args:
+        data: Response bytes from BLE device
+
+    Returns:
+        BLEBasicData object or None on failure
+    """
+    if len(data) < BLE_PACKET_SIZE:
+        return None
+
+    if data[0] != 0x0F or data[1] != 0x61:
+        return None
+
+    # Parse channel status (bytes 3-6)
+    channel_status = tuple(data[i] & 0xFF for i in range(3, 7))
+
+    # Firmware/hardware info may be at different offsets
+    # This is a placeholder - actual format may need adjustment
+    fw_major = data[7] & 0xFF if len(data) > 7 else 1
+    fw_minor = data[8] & 0xFF if len(data) > 8 else 0
+    hw_version = data[9] & 0xFF if len(data) > 9 else 0
+
+    return BLEBasicData(
+        channel_status=channel_status,
+        firmware_version=f"{fw_major}.{fw_minor:02d}",
+        hardware_version=hw_version,
+    )
+
+
+@dataclass
+class BLEVersionInfo:
+    """Parsed version info from BLE 0x57 command response."""
+    firmware_major: int
+    firmware_minor: int
+    hardware_version: int
+
+    @property
+    def firmware_version(self) -> str:
+        return f"{self.firmware_major}.{self.firmware_minor:02d}"
+
+
+def parse_ble_version(data: bytes) -> Optional[BLEVersionInfo]:
+    """
+    Parse BLE version info from 0x57 command response.
+
+    According to BLE_PROTOCOL.md:
+    - Firmware version: bytes 14-15 (major.minor)
+    - Hardware version: byte 16
+
+    Args:
+        data: Response bytes from BLE device
+
+    Returns:
+        BLEVersionInfo object or None on failure
+    """
+    if len(data) < BLE_PACKET_SIZE:
+        return None
+
+    if data[0] != 0x0F or data[1] != 0x57:
+        return None
+
+    # Version info per BLE_PROTOCOL.md - bytes 14-16
+    fw_major = data[14] & 0xFF
+    fw_minor = data[15] & 0xFF
+    hw_version = data[16] & 0xFF
+
+    return BLEVersionInfo(
         firmware_major=fw_major,
         firmware_minor=fw_minor,
         hardware_version=hw_version,

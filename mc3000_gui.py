@@ -3,13 +3,15 @@ MC3000 GUI Components
 
 PySide6-based graphical user interface for SKYRC MC3000 battery charger.
 Provides real-time monitoring of all 4 charging slots.
+Supports both USB and BLE (Bluetooth Low Energy) connections.
 """
 
-__version__ = "1.5.1"
+__version__ = "1.6.0"
 
 import sys
 import logging
-from typing import Optional, List
+import asyncio
+from typing import Optional, List, Union
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,12 +31,27 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFormLayout,
+    QTabWidget,
+    QListWidget,
+    QListWidgetItem,
+    QDialogButtonBox,
 )
-from PySide6.QtCore import Qt, QTimer, Signal, QThread
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, Slot
 from PySide6.QtGui import QFont, QPalette, QColor
 
 from mc3000_usb import MC3000USB, MC3000USBError, MC3000PermissionError
 from mc3000_protocol import SlotData, STATUS_CODES
+
+# Try to import BLE module (optional dependency)
+try:
+    from mc3000_ble import MC3000BLE, MC3000BLEError, BLEDeviceInfo, BLEConnectionManager
+    BLE_AVAILABLE = MC3000BLE.check_ble_available()
+except ImportError:
+    MC3000BLE = None
+    MC3000BLEError = Exception
+    BLEDeviceInfo = None
+    BLEConnectionManager = None
+    BLE_AVAILABLE = False
 
 # Try to import graph module (optional dependency)
 try:
@@ -63,6 +80,299 @@ STATUS_COLORS = {
     4: "#00CCCC",  # Finished - Cyan
 }
 ERROR_COLOR = "#FF0000"  # Red for errors
+
+# Transport type enum
+TRANSPORT_USB = "USB"
+TRANSPORT_BLE = "BLE"
+
+
+class BLEScanWorker(QThread):
+    """Worker thread for BLE device scanning."""
+
+    devices_found = Signal(list)  # List of BLEDeviceInfo
+    scan_error = Signal(str)
+    scan_finished = Signal()
+
+    def __init__(self, timeout: float = 5.0, parent=None):
+        super().__init__(parent)
+        self.timeout = timeout
+
+    def run(self):
+        """Run BLE scan in background thread."""
+        if not BLE_AVAILABLE:
+            self.scan_error.emit("BLE library not available")
+            self.scan_finished.emit()
+            return
+
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                devices = loop.run_until_complete(MC3000BLE.scan_devices(self.timeout))
+                self.devices_found.emit(devices)
+            finally:
+                loop.close()
+        except Exception as e:
+            self.scan_error.emit(str(e))
+        finally:
+            self.scan_finished.emit()
+
+
+class BLEPollWorker(QThread):
+    """Worker thread for BLE connection and polling operations.
+
+    Uses BLEConnectionManager to handle both connection and polling
+    in the same event loop, avoiding cross-loop issues with bleak.
+    """
+
+    slot_data_received = Signal(int, object)  # slot_number, SlotData
+    connection_established = Signal()  # emitted when connected
+    connection_lost = Signal(str)  # error message
+    poll_error = Signal(str)
+
+    def __init__(self, device_address: str, parent=None):
+        super().__init__(parent)
+        self._device_address = device_address
+        self._manager: Optional["BLEConnectionManager"] = None
+
+    def stop(self):
+        """Signal the worker to stop."""
+        if self._manager:
+            self._manager.stop()
+
+    def _on_slot_data(self, slot: int, data: SlotData):
+        """Callback for slot data received."""
+        self.slot_data_received.emit(slot, data)
+
+    def _on_error(self, error: str):
+        """Callback for errors."""
+        self.poll_error.emit(error)
+
+    def _on_connected(self, connected: bool):
+        """Callback for connection state changes."""
+        if connected:
+            self.connection_established.emit()
+        else:
+            self.connection_lost.emit("BLE connection closed")
+
+    def run(self):
+        """Run connection and polling in background thread."""
+        if not BLE_AVAILABLE or BLEConnectionManager is None:
+            self.connection_lost.emit("BLE not available")
+            return
+
+        self._manager = BLEConnectionManager()
+        self._manager.set_callbacks(
+            slot_data=self._on_slot_data,
+            error=self._on_error,
+            connected=self._on_connected,
+        )
+
+        try:
+            # This blocks until stop() is called or connection is lost
+            self._manager.start(self._device_address)
+        except Exception as e:
+            self.connection_lost.emit(str(e))
+
+
+class DeviceSelectionDialog(QDialog):
+    """Dialog for selecting USB or BLE device connection."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.selected_device = None
+        self.selected_transport = None
+        self._scan_worker = None
+        self._setup_ui()
+        self._refresh_usb_devices()
+
+    def _setup_ui(self):
+        self.setWindowTitle("Connect to MC3000")
+        self.setMinimumWidth(450)
+        self.setMinimumHeight(350)
+
+        layout = QVBoxLayout(self)
+
+        # Tab widget for USB/BLE selection
+        self.tab_widget = QTabWidget()
+
+        # USB Tab
+        usb_widget = QWidget()
+        usb_layout = QVBoxLayout(usb_widget)
+
+        usb_label = QLabel("Available USB Devices:")
+        usb_layout.addWidget(usb_label)
+
+        self.usb_list = QListWidget()
+        self.usb_list.itemDoubleClicked.connect(self._on_usb_double_click)
+        usb_layout.addWidget(self.usb_list)
+
+        usb_btn_layout = QHBoxLayout()
+        self.usb_refresh_btn = QPushButton("Refresh")
+        self.usb_refresh_btn.clicked.connect(self._refresh_usb_devices)
+        usb_btn_layout.addWidget(self.usb_refresh_btn)
+        usb_btn_layout.addStretch()
+        usb_layout.addLayout(usb_btn_layout)
+
+        self.tab_widget.addTab(usb_widget, "USB")
+
+        # BLE Tab
+        ble_widget = QWidget()
+        ble_layout = QVBoxLayout(ble_widget)
+
+        if BLE_AVAILABLE:
+            ble_label = QLabel("Scan for Bluetooth devices:")
+            ble_layout.addWidget(ble_label)
+
+            self.ble_list = QListWidget()
+            self.ble_list.itemDoubleClicked.connect(self._on_ble_double_click)
+            ble_layout.addWidget(self.ble_list)
+
+            ble_btn_layout = QHBoxLayout()
+            self.ble_scan_btn = QPushButton("Scan")
+            self.ble_scan_btn.clicked.connect(self._start_ble_scan)
+            ble_btn_layout.addWidget(self.ble_scan_btn)
+
+            self.ble_status_label = QLabel("")
+            ble_btn_layout.addWidget(self.ble_status_label)
+            ble_btn_layout.addStretch()
+            ble_layout.addLayout(ble_btn_layout)
+        else:
+            no_ble_label = QLabel(
+                "Bluetooth support not available.\n\n"
+                "Install the 'bleak' library:\n"
+                "pip install bleak"
+            )
+            no_ble_label.setAlignment(Qt.AlignCenter)
+            no_ble_label.setStyleSheet("color: gray;")
+            ble_layout.addWidget(no_ble_label)
+
+        self.tab_widget.addTab(ble_widget, "Bluetooth")
+
+        layout.addWidget(self.tab_widget)
+
+        # Dialog buttons
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+        self.ok_button = button_box.button(QDialogButtonBox.Ok)
+        self.ok_button.setText("Connect")
+        self.ok_button.setEnabled(False)
+        layout.addWidget(button_box)
+
+        # Connect selection changes to enable/disable OK button
+        self.usb_list.itemSelectionChanged.connect(self._update_ok_button)
+        if BLE_AVAILABLE:
+            self.ble_list.itemSelectionChanged.connect(self._update_ok_button)
+
+    def _refresh_usb_devices(self):
+        """Refresh the list of USB devices."""
+        self.usb_list.clear()
+        devices = MC3000USB.enumerate_devices()
+        if devices:
+            for dev in devices:
+                item = QListWidgetItem(
+                    f"{dev.get('product', 'MC3000')} - {dev.get('manufacturer', 'SKYRC')}"
+                )
+                item.setData(Qt.UserRole, dev)
+                self.usb_list.addItem(item)
+        else:
+            item = QListWidgetItem("No USB devices found")
+            item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+            item.setForeground(QColor("gray"))
+            self.usb_list.addItem(item)
+        self._update_ok_button()
+
+    def _start_ble_scan(self):
+        """Start BLE device scan."""
+        if not BLE_AVAILABLE:
+            return
+
+        self.ble_list.clear()
+        self.ble_scan_btn.setEnabled(False)
+        self.ble_status_label.setText("Scanning...")
+
+        self._scan_worker = BLEScanWorker(timeout=5.0)
+        self._scan_worker.devices_found.connect(self._on_ble_devices_found)
+        self._scan_worker.scan_error.connect(self._on_ble_scan_error)
+        self._scan_worker.scan_finished.connect(self._on_ble_scan_finished)
+        self._scan_worker.start()
+
+    @Slot(list)
+    def _on_ble_devices_found(self, devices: List):
+        """Handle discovered BLE devices."""
+        for dev in devices:
+            item = QListWidgetItem(f"{dev.name} ({dev.address}) - RSSI: {dev.rssi} dBm")
+            item.setData(Qt.UserRole, dev)
+            self.ble_list.addItem(item)
+
+    @Slot(str)
+    def _on_ble_scan_error(self, error: str):
+        """Handle BLE scan error."""
+        self.ble_status_label.setText(f"Error: {error}")
+
+    @Slot()
+    def _on_ble_scan_finished(self):
+        """Handle BLE scan completion."""
+        self.ble_scan_btn.setEnabled(True)
+        if self.ble_list.count() == 0:
+            self.ble_status_label.setText("No devices found")
+            item = QListWidgetItem("No BLE devices found - try scanning again")
+            item.setFlags(item.flags() & ~Qt.ItemIsSelectable)
+            item.setForeground(QColor("gray"))
+            self.ble_list.addItem(item)
+        else:
+            self.ble_status_label.setText(f"Found {self.ble_list.count()} device(s)")
+        self._update_ok_button()
+
+    def _update_ok_button(self):
+        """Update OK button state based on selection."""
+        current_tab = self.tab_widget.currentIndex()
+        if current_tab == 0:  # USB tab
+            selected = self.usb_list.currentItem()
+            enabled = selected is not None and selected.data(Qt.UserRole) is not None
+        else:  # BLE tab
+            if BLE_AVAILABLE:
+                selected = self.ble_list.currentItem()
+                enabled = selected is not None and selected.data(Qt.UserRole) is not None
+            else:
+                enabled = False
+        self.ok_button.setEnabled(enabled)
+
+    def _on_usb_double_click(self, item: QListWidgetItem):
+        """Handle double-click on USB device."""
+        if item.data(Qt.UserRole) is not None:
+            self._on_accept()
+
+    def _on_ble_double_click(self, item: QListWidgetItem):
+        """Handle double-click on BLE device."""
+        if item.data(Qt.UserRole) is not None:
+            self._on_accept()
+
+    def _on_accept(self):
+        """Handle dialog accept."""
+        current_tab = self.tab_widget.currentIndex()
+        if current_tab == 0:  # USB tab
+            selected = self.usb_list.currentItem()
+            if selected and selected.data(Qt.UserRole):
+                self.selected_device = selected.data(Qt.UserRole)
+                self.selected_transport = TRANSPORT_USB
+                self.accept()
+        else:  # BLE tab
+            if BLE_AVAILABLE:
+                selected = self.ble_list.currentItem()
+                if selected and selected.data(Qt.UserRole):
+                    self.selected_device = selected.data(Qt.UserRole)
+                    self.selected_transport = TRANSPORT_BLE
+                    self.accept()
+
+    def closeEvent(self, event):
+        """Handle dialog close."""
+        if self._scan_worker and self._scan_worker.isRunning():
+            self._scan_worker.wait()
+        event.accept()
 
 
 class SlotWidget(QGroupBox):
@@ -230,13 +540,24 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.mc3000 = MC3000USB()
+        # Transport layer - USB connection object (BLE is managed by worker)
+        self.mc3000: Optional[MC3000USB] = None
+        self.transport_type: Optional[str] = None
+
+        # USB-specific
+        self.mc3000_usb = MC3000USB()
+
+        # BLE-specific (worker manages connection internally)
+        self.ble_poll_worker: Optional[BLEPollWorker] = None
+        self._ble_device_name: str = ""
+
+        # USB polling timer (BLE uses worker thread)
         self.poll_timer = QTimer(self)
         self.poll_timer.timeout.connect(self._poll_device)
 
         self._setup_ui()
-        if self._check_hid_available():
-            self._auto_connect()
+        # Show connection dialog on startup
+        self._show_connection_dialog()
 
     def _setup_ui(self):
         """Set up the main window UI."""
@@ -251,6 +572,12 @@ class MainWindow(QMainWindow):
 
         # Header with controls
         header_layout = QHBoxLayout()
+
+        # Connect/Disconnect button
+        self.connect_btn = QPushButton("Connect...")
+        self.connect_btn.clicked.connect(self._on_connect_button_clicked)
+        self.connect_btn.setFixedWidth(100)
+        header_layout.addWidget(self.connect_btn)
 
         # Configure button
         if CONFIG_AVAILABLE:
@@ -286,6 +613,10 @@ class MainWindow(QMainWindow):
         self.connection_indicator = QLabel("\u25cf")
         self.connection_indicator.setStyleSheet("color: #FF0000; font-size: 16px;")
         header_layout.addWidget(self.connection_indicator)
+
+        self.transport_label = QLabel("")
+        self.transport_label.setStyleSheet("font-weight: bold;")
+        header_layout.addWidget(self.transport_label)
 
         self.connection_status = QLabel("Disconnected")
         header_layout.addWidget(self.connection_status)
@@ -341,22 +672,55 @@ class MainWindow(QMainWindow):
         if self.graph_widget:
             self.graph_widget.setVisible(state == Qt.Checked)
 
+    def _is_connected(self) -> bool:
+        """Check if connected to any device."""
+        if self.transport_type == TRANSPORT_BLE:
+            # BLE connection is managed by the worker
+            return self.ble_poll_worker is not None and self.ble_poll_worker.isRunning()
+        elif self.mc3000 is not None:
+            return self.mc3000.is_connected()
+        return False
+
     def _on_config_clicked(self):
         """Open the slot configuration dialog."""
-        if CONFIG_AVAILABLE and self.mc3000.is_connected():
-            dialog = SlotConfigDialog(self.mc3000, self)
-            dialog.exec()
+        if CONFIG_AVAILABLE and self._is_connected():
+            # Config dialog only works with USB
+            if self.transport_type == TRANSPORT_USB:
+                dialog = SlotConfigDialog(self.mc3000, self)
+                dialog.exec()
+            else:
+                QMessageBox.information(
+                    self,
+                    "Not Available",
+                    "Slot configuration is only available via USB connection."
+                )
 
     def _on_system_settings_clicked(self):
         """Open the system settings dialog."""
-        if self.mc3000.is_connected():
-            dialog = SystemSettingsDialog(self.mc3000, self)
-            dialog.exec()
+        if self._is_connected():
+            if self.transport_type == TRANSPORT_USB:
+                dialog = SystemSettingsDialog(self.mc3000, self)
+                dialog.exec()
+            else:
+                QMessageBox.information(
+                    self,
+                    "Not Available",
+                    "System settings dialog is only available via USB connection."
+                )
 
     def _on_start_clicked(self):
         """Start charger processing for all configured slots."""
-        if not self.mc3000.is_connected():
+        if not self._is_connected():
             QMessageBox.warning(self, "Not Connected", "Please connect to the charger first.")
+            return
+
+        if self.transport_type == TRANSPORT_BLE:
+            QMessageBox.information(
+                self,
+                "Not Available",
+                "Start command is not supported via BLE.\n"
+                "Use the charger buttons to start processing."
+            )
             return
 
         reply = QMessageBox.question(
@@ -375,64 +739,43 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.warning(self, "Start Failed", "Failed to start charging.")
 
-    def _check_hid_available(self) -> bool:
-        """Check if HID library is available and show warning if not."""
-        if not MC3000USB.check_hid_available():
-            QMessageBox.warning(
-                self,
-                "HID Library Not Found",
-                "The 'hid' library is not installed.\n\n"
-                "Please install it with:\n"
-                "pip install hid\n\n"
-                "On Linux, you may also need to install libhidapi:\n"
-                "sudo apt install libhidapi-hidraw0\n\n"
-                "The application will run but cannot connect to devices."
-            )
-            self.status_bar.showMessage("Error: HID library not available")
-            return False
-        return True
+    def _on_connect_button_clicked(self):
+        """Handle connect/disconnect button click."""
+        if self._is_connected():
+            self._disconnect()
+        else:
+            self._show_connection_dialog()
 
-    def _auto_connect(self):
-        """Connect to the device on startup."""
-        self._on_connect_clicked()
+    def _show_connection_dialog(self):
+        """Show device selection dialog."""
+        dialog = DeviceSelectionDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            if dialog.selected_transport == TRANSPORT_USB:
+                self._connect_usb(dialog.selected_device)
+            elif dialog.selected_transport == TRANSPORT_BLE:
+                self._connect_ble(dialog.selected_device)
 
-    def _on_connect_clicked(self):
-        """Handle connect button click."""
-        self.status_bar.showMessage("Connecting...")
+    def _connect_usb(self, device_info: dict):
+        """Connect via USB."""
+        self.status_bar.showMessage("Connecting via USB...")
 
         try:
-            # Check for available devices first
-            devices = MC3000USB.enumerate_devices()
-            if not devices:
-                raise MC3000USBError(
-                    "No MC3000 device found.\n\n"
-                    "Make sure the device is connected via USB.\n"
-                    "On Linux, you may need to set up udev rules for USB HID access."
-                )
-
-            self.mc3000.connect()
+            device_path = device_info.get('path')
+            self.mc3000_usb.connect(device_path)
+            self.mc3000 = self.mc3000_usb
+            self.transport_type = TRANSPORT_USB
 
             # Update UI for connected state
-            self.connection_indicator.setStyleSheet("color: #00AA00; font-size: 16px;")
-            self.connection_status.setText("Connected")
-            if CONFIG_AVAILABLE and hasattr(self, 'config_btn'):
-                self.config_btn.setEnabled(True)
-            if hasattr(self, 'system_settings_btn'):
-                self.system_settings_btn.setEnabled(True)
-            if hasattr(self, 'start_btn'):
-                self.start_btn.setEnabled(True)
-
-            self.firmware_label.setText("")
+            self._update_connected_ui()
 
             # Start polling
-            self.poll_timer.start(1000)  # Poll every 1 second
-            self.status_bar.showMessage("Connected - Monitoring active")
+            self.poll_timer.start(1000)
+            self.status_bar.showMessage("Connected via USB - Monitoring active")
 
             # Do initial poll
             self._poll_device()
 
         except MC3000PermissionError as e:
-            # Show detailed permission error with instructions
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Critical)
             msg.setWindowTitle("USB Permission Error")
@@ -442,24 +785,117 @@ class MainWindow(QMainWindow):
             msg.exec()
             self.status_bar.showMessage("Permission denied - see instructions")
         except MC3000USBError as e:
-            QMessageBox.critical(self, "Connection Error", str(e))
-            self.status_bar.showMessage("Connection failed")
+            QMessageBox.critical(self, "USB Connection Error", str(e))
+            self.status_bar.showMessage("USB connection failed")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Unexpected error: {e}")
             self.status_bar.showMessage("Connection failed")
 
-    def _on_disconnect_clicked(self):
-        """Handle disconnect button click."""
+    def _connect_ble(self, device_info: "BLEDeviceInfo"):
+        """Connect via BLE."""
+        if not BLE_AVAILABLE:
+            QMessageBox.critical(self, "BLE Error", "BLE library not available")
+            return
+
+        self.status_bar.showMessage(f"Connecting via BLE to {device_info.name}...")
+        self._ble_device_name = device_info.name
+
+        # Set transport type before starting worker
+        self.transport_type = TRANSPORT_BLE
+
+        # Start BLE worker which handles both connection and polling
+        # The worker runs connection and polling in its own event loop
+        self.ble_poll_worker = BLEPollWorker(device_info.address)
+        self.ble_poll_worker.slot_data_received.connect(self._on_ble_slot_data)
+        self.ble_poll_worker.connection_established.connect(self._on_ble_connected)
+        self.ble_poll_worker.connection_lost.connect(self._on_ble_connection_lost)
+        self.ble_poll_worker.poll_error.connect(self._on_ble_poll_error)
+        self.ble_poll_worker.start()
+
+    @Slot()
+    def _on_ble_connected(self):
+        """Handle successful BLE connection."""
+        self._update_connected_ui()
+        device_name = getattr(self, '_ble_device_name', 'device')
+        self.status_bar.showMessage(f"Connected via BLE to {device_name}")
+
+    def _update_connected_ui(self):
+        """Update UI elements for connected state."""
+        self.connection_indicator.setStyleSheet("color: #00AA00; font-size: 16px;")
+        self.connection_status.setText("Connected")
+        self.transport_label.setText(f"[{self.transport_type}]")
+        self.connect_btn.setText("Disconnect")
+
+        if CONFIG_AVAILABLE and hasattr(self, 'config_btn'):
+            # Config only works with USB
+            self.config_btn.setEnabled(self.transport_type == TRANSPORT_USB)
+        if hasattr(self, 'system_settings_btn'):
+            # System settings only works with USB
+            self.system_settings_btn.setEnabled(self.transport_type == TRANSPORT_USB)
+        if hasattr(self, 'start_btn'):
+            # Start button only works with USB
+            self.start_btn.setEnabled(self.transport_type == TRANSPORT_USB)
+
+        self.firmware_label.setText("")
+
+    @Slot(int, object)
+    def _on_ble_slot_data(self, slot: int, data: SlotData):
+        """Handle slot data received from BLE worker."""
+        if slot < len(self.slot_widgets):
+            self.slot_widgets[slot].update_data(data)
+            if self.graph_widget and data:
+                self.graph_widget.update_data(slot, data)
+
+            # Update internal temp display from first slot with data
+            if slot == 0 and data:
+                self.firmware_label.setText(
+                    f"Charger Temp: {data.internal_temp_c:.1f} \u00b0C"
+                )
+
+    @Slot(str)
+    def _on_ble_connection_lost(self, error: str):
+        """Handle BLE connection loss."""
+        logger.warning(f"BLE connection lost: {error}")
         self._disconnect()
+        QMessageBox.warning(
+            self,
+            "Connection Lost",
+            f"BLE connection was lost: {error}\n\nPlease reconnect."
+        )
+
+    @Slot(str)
+    def _on_ble_poll_error(self, error: str):
+        """Handle BLE polling error."""
+        logger.warning(f"BLE poll error: {error}")
+        self.status_bar.showMessage(f"BLE error: {error}")
 
     def _disconnect(self):
         """Disconnect from device and update UI."""
+        # Stop USB polling timer
         self.poll_timer.stop()
-        self.mc3000.disconnect()
+
+        # Stop BLE worker if running
+        if self.ble_poll_worker is not None:
+            self.ble_poll_worker.stop()
+            self.ble_poll_worker.wait(2000)  # Wait up to 2 seconds
+            self.ble_poll_worker = None
+
+        # Disconnect from USB device if connected
+        if self.mc3000 is not None:
+            try:
+                self.mc3000.disconnect()
+            except Exception as e:
+                logger.warning(f"Error during disconnect: {e}")
+
+        self.mc3000 = None
+        self.transport_type = None
 
         # Update UI for disconnected state
         self.connection_indicator.setStyleSheet("color: #FF0000; font-size: 16px;")
         self.connection_status.setText("Disconnected")
+        self.transport_label.setText("")
+        self.connect_btn.setText("Connect...")
+
         if CONFIG_AVAILABLE and hasattr(self, 'config_btn'):
             self.config_btn.setEnabled(False)
         if hasattr(self, 'system_settings_btn'):
@@ -472,13 +908,14 @@ class MainWindow(QMainWindow):
         for slot_widget in self.slot_widgets:
             slot_widget.clear_data()
 
-        # Note: Don't clear graph data on disconnect - user may want to review it
-
         self.status_bar.showMessage("Disconnected")
 
     def _poll_device(self):
-        """Poll device for updated slot data."""
-        if not self.mc3000.is_connected():
+        """Poll device for updated slot data (USB only - BLE uses worker thread)."""
+        if self.transport_type != TRANSPORT_USB:
+            return
+
+        if not self._is_connected():
             return
 
         try:
@@ -514,13 +951,25 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event."""
         self.poll_timer.stop()
-        if self.mc3000.is_connected():
-            self.mc3000.disconnect()
+
+        # Stop BLE worker if running
+        if self.ble_poll_worker is not None:
+            self.ble_poll_worker.stop()
+            self.ble_poll_worker.wait(2000)
+            self.ble_poll_worker = None
+
+        # Disconnect from device
+        if self._is_connected():
+            try:
+                self.mc3000.disconnect()
+            except Exception as e:
+                logger.warning(f"Error during disconnect on close: {e}")
+
         event.accept()
 
 
 class SystemSettingsDialog(QDialog):
-    """Dialog to display system settings."""
+    """Dialog to display system settings (USB only)."""
 
     def __init__(self, mc3000: MC3000USB, parent: Optional[QWidget] = None):
         super().__init__(parent)

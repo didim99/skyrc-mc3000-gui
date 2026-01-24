@@ -256,6 +256,141 @@ IL_0705:  rem                  // seconds = time % 60
 
 **Note:** All 16-bit values are big-endian (high byte first).
 
+---
+
+## Firmware (MC3000) Findings - Update from device firmware image
+
+**Date:** 2026-01-23  
+**Target:** `UpgradeFirmware.rom.hex` (from MC3000_Firmware_Update__V1.25.exe)  
+**Method:** Intel HEX -> BIN, string scan, quick static inspection
+
+### Confirmed from firmware image (not from PC app)
+
+- **CPU/arch:** ARM Cortex-M (Thumb). Vector table present at `0x08004000` in `UpgradeFirmware.rom.bin`.
+- **App flash range:** `0x08004000` - `0x08019583` (87,428 bytes of actual data).
+- **External ADC references:** Firmware strings include  
+  - `MCP3424-1 Err` at `0x080188F3`  
+  - `MCP3424-2 Err` at `0x08018907`  
+  This strongly implies **two MCP3424 ADCs** (I2C 18-bit). These are likely used for analog measurements including temperatures.
+- **Temperature UI strings present:**  
+  - `SysTemp:` at `0x08018C34`  
+  - `BattTemp:` at `0x08018C40`  
+  - `BattTemp Cut` and `SysTemp Too Hot` strings are also present.  
+  This confirms the firmware tracks **two temperature channels** (battery/slot temp and system/charger temp).
+
+### Implications / working hypothesis (needs confirmation)
+
+- **Temperature sensors:** Likely NTC thermistors measured through MCP3424 ADC channels. The firmware does not appear to use MCU internal temperature only; presence of MCP3424 errors suggests external analog sensing.
+- **Packet offsets for temps:** Not confirmed yet in firmware. The PC app suggests bytes 15-16 (batt) and 17-18 (int), but hardware testing suggests int temp at 19-20. Firmware analysis must trace the status packet builder to confirm exact offsets.
+
+### TODO (firmware verification tasks)
+
+- Locate the status packet build routine (likely for command `0x55` / `0x5F`) and identify exact byte offsets for `BattTemp` and `SysTemp`.
+- Trace temperature conversion routine to determine whether a lookup table (thermistor curve) or formula is used.
+
+### Firmware status packet builder (CMD 0x55) - confirmed offsets
+
+Using Ghidra headless + disassembly of `UpgradeFirmware.rom.bin`, the status packet builder for
+command `0x55` is located at **0x08012F4C**. This routine writes the packet to a RAM buffer at
+**0x20001B50** (register `r7`), and computes the checksum at **offset 0x3F**.
+
+**Temperature fields in firmware (actual packet bytes):**
+
+```
+0x08013066: ldrh r0, [r4, #0x5E]
+0x0801306A: lsrs r1, r0, #8
+0x0801306C: strb r1, [r7, #0x14]   ; temp_hi
+0x0801306E: strb r0, [r7, #0x15]   ; temp_lo
+
+0x08013070: ldrh r0, [r4, #0x5C]
+0x08013074: lsrs r1, r0, #8
+0x08013076: strb r1, [r7, #0x16]   ; temp_hi
+0x08013078: strb r0, [r7, #0x17]   ; temp_lo
+```
+
+**Conclusion:** The firmware places two 16-bit temperature values at **byte offsets 0x14–0x17**
+within the status packet (big-endian, high byte then low byte). This does **not** match the
+PC-side assumption of temperatures at `0x0F–0x12`.  
+
+**Open point:** The mapping of which temp is “Battery” vs “System” corresponds to struct fields
+at `r4+0x5E` and `r4+0x5C` (order: `+0x5E` → packet `0x14–0x15`, `+0x5C` → packet `0x16–0x17`).
+Need to trace usage of these fields to confirm which is batt vs sys.
+
+### Firmware-derived status packet layout (CMD 0x55) - field map (partial)
+
+From the same builder (`0x08012F4C`), these offsets are written to the packet buffer at `r7=0x20001B50`.
+This shows real firmware offsets, which appear **shifted by -1** compared to the PC app (firmware
+puts `cmd` at offset `0x00` and checksum at `0x3F`).
+
+| Offset | Size | Source | Notes |
+|---|---|---|---|
+| 0x00 | 1 | literal `0x55` | Command byte |
+| 0x01 | 1 | `r6` | Slot index (input to routine) |
+| 0x02 | 1 | `ldrb [r8+1]` | Unknown |
+| 0x03 | 1 | `ldrb [r8+2]` | Unknown |
+| 0x04 | 1 | `ldrb [r4+0x05]` | Unknown |
+| 0x05 | 1 | return of `0x080070BC` | Unknown |
+| 0x06–0x07 | 2 | `ldrh [r4+0x54]` | Unknown (16-bit) |
+| 0x08–0x09 | 2 | `ldrh [r4+0x1C]` | Unknown (16-bit) |
+| 0x0A–0x0B | 2 | `ldrh [r4+0x1E]` | Unknown (16-bit) |
+| 0x0C–0x0D | 2 | `ldrh [r4+0x1F2]` | Unknown (16-bit) |
+| 0x0E–0x0F | 2 | `ldrh [r4+0x46]` | Internal Resistance (IR), raw (16-bit) |
+| 0x10–0x11 | 2 | `ldrh [r4+0x1F4]` | Unknown (16-bit) |
+| 0x12–0x13 | 2 | `ldrh [0x20001B30 + 0x12]` | Unknown (16-bit, different base) |
+| 0x14–0x15 | 2 | `ldrh [r4+0x5E]` | Temperature A (0.1°C likely) |
+| 0x16–0x17 | 2 | `ldrh [r4+0x5C]` | Temperature B (0.1°C likely) |
+| 0x18 | 1 | `udiv` by `0xE10` then `uxtb` | Derived from 16-bit value (likely hours from seconds) |
+| 0x19–0x1A | 2 | `ldrh [r4+0x1F6]` | Average of `r4+0x4A` samples (16-bit) |
+| 0x1B | 1 | `ldrb [0x20000011]` | Unknown (global byte) |
+| 0x3F | 1 | checksum | Sum of bytes 0x00–0x3E |
+
+**Notes:**
+- The firmware writes **many fields not aligned with the PC app’s offset map**, suggesting
+  either a different packet layout or an off-by-one assumption in the PC app (e.g., missing
+  Report ID byte in firmware).
+- To fully identify each field, trace the source struct at `r4` (base derived from `r7`)
+  and correlate with known UI strings (voltage/current/capacity/time).
+
+### Inferred field meanings (best-effort, needs verification)
+
+These are **educated guesses** based on typical charger packet layouts, the contiguous 16-bit
+field writes, and observed arithmetic (e.g., division by 0xE10 = 3600).
+
+| Offset | Likely meaning | Rationale |
+|---|---|---|
+| 0x01 | Slot ID | Directly stored from input `r6` (slot argument). |
+| 0x02 | Battery Type | Loaded from `r8+1` (per-slot status buffer). |
+| 0x03 | Work Mode | Loaded from `r8+2` (per-slot status buffer). |
+| 0x04 | Work Status / Flags | From `r4+0x05` (per-slot struct). |
+| 0x05 | Work State / Error | Result of call `0x080070BC` stored to byte 0x05. |
+| 0x06–0x07 | Work Time (seconds) | 16-bit field from `r4+0x54` and aligns with PC app’s 7–8 when shifted by -1. |
+| 0x08–0x09 | Voltage (mV) | 16-bit field from `r4+0x1C`, aligns with PC app’s 9–10 with -1 shift. |
+| 0x0A–0x0B | Current (mA) | 16-bit field from `r4+0x1E`, aligns with PC app’s 11–12 with -1 shift. |
+| 0x0C–0x0D | Capacity (mAh) | 16-bit field from `r4+0x1F2`, aligns with PC app’s 13–14 with -1 shift. |
+| 0x0E–0x0F | Internal Resistance (IR), raw | `r4+0x46` also used in IR-related logic and scaled by /10 for UI packet. |
+| 0x10–0x11 | Auxiliary 16-bit | Field `r4+0x1F4` (adjacent to 0x1F2/0x1F6 block); meaning TBD. |
+| 0x12–0x13 | Unknown 16-bit (global) | Loaded from `0x20001B30 + 0x12` (outside per-slot struct). |
+| 0x14–0x17 | Temperatures A/B | Confirmed temps from `r4+0x5E` and `r4+0x5C`. |
+| 0x18 | Time hours (derived) | Per-slot value from `0x2000004C + slot*2`, divided by 3600 (0xE10) and capped vs 0x7E90. |
+| 0x19–0x1A | Smoothed measurement (avg) | `r4+0x1F6` is computed as running average of `r4+0x4A` (see 0x08007708). |
+| 0x1B | Global flag/status | Single byte from global `0x20000011`. |
+
+#### Firmware evidence for IR (r4+0x46)
+
+- `0x08013046` (status packet builder `0x08012F4C`): `ldrh r0, [r4, 0x46]` stored to offsets `0x0E–0x0F`.
+- `0x08016356` (UI/other packet builder around `0x08016270`): `ldrh r0, [r4, 0x46]`, then `udiv r0, r0, r3` where `r3=0x0A` (`0x080162B0`), stored as single byte at offset `0x0F`.
+- `0x080054B2`: compares `r4+0x46` against a threshold derived from `[r7+0x20]`; on exceed sets `r4+3 = 0x0A` (likely IR-related error/status).
+
+**Implication:** `r4+0x46` is internal resistance. The UI packet uses `IR / 10` in one byte, suggesting raw units are tenths (0.1) of the displayed value (likely mOhm).
+
+#### Other aux fields (r4+0x1F4, r4+0x1F6)
+
+- `r4+0x1F4` is computed from ADC/math routines (`0x08007052` and `0x0800707C`), compared against `2`, and used as a gate in `0x08006FAA`. This looks like a derived measurement or validity/quality flag; exact meaning TBD.
+- `r4+0x1F6` is updated at `0x08007708` as a running average: `r4+0x200` accumulates `r4+0x4A`, `r4+0x1FC` counts samples, and `r4+0x1F6 = (sum / count)`. This value is sent in status bytes `0x19–0x1A`.
+
+**Caveat:** Until we cross-check with live USB captures or trace these `r4+offset` fields to UI
+formatting strings, these labels remain provisional.
+
 #### Data Extraction Examples (from IL analysis)
 
 ```c
@@ -789,7 +924,7 @@ The MC3000 appears to send status data automatically when charging is active. Th
 There is no explicit "request status" command - the device **pushes** updates continuously (approximately every second based on timer usage).
 
 ### 6. Items NOT Found in Protocol
-- **Internal Resistance (IR):** No IR measurement fields found - MC3000 may not measure this
+- **Internal Resistance (IR):** Present (see firmware findings below); unit scaling still TBD
 - **Cycle Counter:** Current cycle number not in status packet (only `Cycle_Count` target in config)
 - **Cell Identification:** No unique battery tracking
 - **Real-time Input Voltage:** See section below
