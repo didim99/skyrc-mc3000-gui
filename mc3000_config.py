@@ -218,6 +218,9 @@ class SlotConfigWidget(QWidget):
             profile_layout.addWidget(self.profile_combo, 1)
             layout.addLayout(profile_layout)
 
+        # Row 1: Battery Settings | Current Settings
+        row1 = QHBoxLayout()
+
         # Battery type and mode
         type_group = QGroupBox("Battery Settings")
         type_layout = QFormLayout(type_group)
@@ -225,7 +228,7 @@ class SlotConfigWidget(QWidget):
         self.battery_type_combo = QComboBox()
         for idx, name in BATTERY_TYPES.items():
             self.battery_type_combo.addItem(name, idx)
-        type_layout.addRow("Battery Type:", self.battery_type_combo)
+        type_layout.addRow("Type:", self.battery_type_combo)
 
         self.mode_combo = QComboBox()
         self._update_mode_combo()
@@ -238,7 +241,7 @@ class SlotConfigWidget(QWidget):
         self.capacity_spin.setSuffix(" mAh")
         type_layout.addRow("Capacity:", self.capacity_spin)
 
-        layout.addWidget(type_group)
+        row1.addWidget(type_group)
 
         # Current settings
         current_group = QGroupBox("Current Settings")
@@ -249,23 +252,27 @@ class SlotConfigWidget(QWidget):
         self.charge_current_spin.setSingleStep(100)
         self.charge_current_spin.setValue(1000)
         self.charge_current_spin.setSuffix(" mA")
-        current_layout.addRow("Charge Current:", self.charge_current_spin)
+        current_layout.addRow("Charge:", self.charge_current_spin)
 
         self.discharge_current_spin = QSpinBox()
         self.discharge_current_spin.setRange(100, 2000)
         self.discharge_current_spin.setSingleStep(100)
         self.discharge_current_spin.setValue(500)
         self.discharge_current_spin.setSuffix(" mA")
-        current_layout.addRow("Discharge Current:", self.discharge_current_spin)
+        current_layout.addRow("Discharge:", self.discharge_current_spin)
 
         self.end_current_spin = QSpinBox()
         self.end_current_spin.setRange(50, 500)
         self.end_current_spin.setSingleStep(10)
         self.end_current_spin.setValue(100)
         self.end_current_spin.setSuffix(" mA")
-        current_layout.addRow("End Current (CC/CV):", self.end_current_spin)
+        current_layout.addRow("End (CC/CV):", self.end_current_spin)
 
-        layout.addWidget(current_group)
+        row1.addWidget(current_group)
+        layout.addLayout(row1)
+
+        # Row 2: Voltage Settings | Cycle Settings
+        row2 = QHBoxLayout()
 
         # Voltage settings
         voltage_group = QGroupBox("Voltage Settings")
@@ -276,16 +283,24 @@ class SlotConfigWidget(QWidget):
         self.end_voltage_spin.setSingleStep(10)
         self.end_voltage_spin.setValue(1450)
         self.end_voltage_spin.setSuffix(" mV")
-        voltage_layout.addRow("Target Voltage:", self.end_voltage_spin)
+        voltage_layout.addRow("Target:", self.end_voltage_spin)
 
         self.cut_voltage_spin = QSpinBox()
         self.cut_voltage_spin.setRange(500, 4000)
         self.cut_voltage_spin.setSingleStep(10)
         self.cut_voltage_spin.setValue(900)
         self.cut_voltage_spin.setSuffix(" mV")
-        voltage_layout.addRow("Cut-off Voltage:", self.cut_voltage_spin)
+        voltage_layout.addRow("Cut-off:", self.cut_voltage_spin)
 
-        layout.addWidget(voltage_group)
+        self.restart_voltage_spin = QSpinBox()
+        self.restart_voltage_spin.setRange(500, 4500)
+        self.restart_voltage_spin.setSingleStep(10)
+        self.restart_voltage_spin.setValue(1000)
+        self.restart_voltage_spin.setSuffix(" mV")
+        self.restart_voltage_spin.setToolTip("Voltage threshold to resume charging after rest")
+        voltage_layout.addRow("Restart:", self.restart_voltage_spin)
+
+        row2.addWidget(voltage_group)
 
         # Cycle settings
         cycle_group = QGroupBox("Cycle Settings")
@@ -294,19 +309,65 @@ class SlotConfigWidget(QWidget):
         self.cycle_count_spin = QSpinBox()
         self.cycle_count_spin.setRange(1, 99)
         self.cycle_count_spin.setValue(1)
-        cycle_layout.addRow("Cycle Count:", self.cycle_count_spin)
+        cycle_layout.addRow("Count:", self.cycle_count_spin)
 
         self.cycle_mode_combo = QComboBox()
         self.cycle_mode_combo.addItems(["C>D", "C>D>C", "D>C", "D>C>D"])
-        cycle_layout.addRow("Cycle Mode:", self.cycle_mode_combo)
+        cycle_layout.addRow("Mode:", self.cycle_mode_combo)
 
-        self.rest_time_spin = QSpinBox()
-        self.rest_time_spin.setRange(1, 60)
-        self.rest_time_spin.setValue(3)
-        self.rest_time_spin.setSuffix(" min")
-        cycle_layout.addRow("Rest Time:", self.rest_time_spin)
+        self.charge_rest_time_spin = QSpinBox()
+        self.charge_rest_time_spin.setRange(1, 60)
+        self.charge_rest_time_spin.setValue(3)
+        self.charge_rest_time_spin.setSuffix(" min")
+        cycle_layout.addRow("Charge Rest:", self.charge_rest_time_spin)
 
-        layout.addWidget(cycle_group)
+        self.discharge_rest_time_spin = QSpinBox()
+        self.discharge_rest_time_spin.setRange(1, 60)
+        self.discharge_rest_time_spin.setValue(3)
+        self.discharge_rest_time_spin.setSuffix(" min")
+        cycle_layout.addRow("Discharge Rest:", self.discharge_rest_time_spin)
+
+        row2.addWidget(cycle_group)
+        layout.addLayout(row2)
+
+        # Row 3: Advanced Settings | Safety Limits
+        row3 = QHBoxLayout()
+
+        # Advanced settings
+        advanced_group = QGroupBox("Advanced Settings")
+        advanced_layout = QFormLayout(advanced_group)
+
+        self.discharge_end_current_spin = QSpinBox()
+        self.discharge_end_current_spin.setRange(100, 500)
+        self.discharge_end_current_spin.setSingleStep(10)
+        self.discharge_end_current_spin.setValue(300)
+        self.discharge_end_current_spin.setSuffix(" mA")
+        advanced_layout.addRow("Disch. End Current:", self.discharge_end_current_spin)
+
+        self.peak_sense_spin = QSpinBox()
+        self.peak_sense_spin.setRange(1, 20)
+        self.peak_sense_spin.setValue(5)
+        self.peak_sense_spin.setSuffix(" mV")
+        self.peak_sense_spin.setToolTip("-dV detection for NiMH/NiCd batteries")
+        advanced_layout.addRow("Peak Sense (-dV):", self.peak_sense_spin)
+
+        self.trickle_current_spin = QSpinBox()
+        self.trickle_current_spin.setRange(0, 200)
+        self.trickle_current_spin.setSingleStep(10)
+        self.trickle_current_spin.setValue(50)
+        self.trickle_current_spin.setSuffix(" mA")
+        self.trickle_current_spin.setSpecialValueText("OFF")
+        self.trickle_current_spin.setToolTip("Trickle current to maintain charge after charging ends")
+        advanced_layout.addRow("Trickle Current:", self.trickle_current_spin)
+
+        self.trickle_time_combo = QComboBox()
+        self.trickle_time_combo.addItem("OFF", 0)
+        self.trickle_time_combo.addItem("End", 1)
+        self.trickle_time_combo.addItem("Rest", 2)
+        self.trickle_time_combo.setToolTip("When to activate trickle charging")
+        advanced_layout.addRow("Trickle Time:", self.trickle_time_combo)
+
+        row3.addWidget(advanced_group)
 
         # Safety settings
         safety_group = QGroupBox("Safety Limits")
@@ -325,7 +386,11 @@ class SlotConfigWidget(QWidget):
         self.cut_time_spin.setSpecialValueText("OFF")
         safety_layout.addRow("Cut-off Time:", self.cut_time_spin)
 
-        layout.addWidget(safety_group)
+        row3.addWidget(safety_group)
+        layout.addLayout(row3)
+
+        # Initialize voltage limits and peak sense visibility based on default battery type
+        self._update_voltage_limits()
 
         layout.addStretch()
 
@@ -341,7 +406,13 @@ class SlotConfigWidget(QWidget):
         self.cut_voltage_spin.valueChanged.connect(self.configChanged)
         self.cycle_count_spin.valueChanged.connect(self.configChanged)
         self.cycle_mode_combo.currentIndexChanged.connect(self.configChanged)
-        self.rest_time_spin.valueChanged.connect(self.configChanged)
+        self.charge_rest_time_spin.valueChanged.connect(self.configChanged)
+        self.discharge_rest_time_spin.valueChanged.connect(self.configChanged)
+        self.discharge_end_current_spin.valueChanged.connect(self.configChanged)
+        self.peak_sense_spin.valueChanged.connect(self.configChanged)
+        self.trickle_current_spin.valueChanged.connect(self.configChanged)
+        self.trickle_time_combo.currentIndexChanged.connect(self.configChanged)
+        self.restart_voltage_spin.valueChanged.connect(self.configChanged)
         self.cut_temp_spin.valueChanged.connect(self.configChanged)
         self.cut_time_spin.valueChanged.connect(self.configChanged)
 
@@ -360,9 +431,21 @@ class SlotConfigWidget(QWidget):
             self.mode_combo.addItem(name, idx)
 
     def _update_voltage_limits(self):
+        battery_type = self.battery_type_combo.currentData()
+        if battery_type is None:
+            battery_type = 0
         min_v, max_v = self.config.get_voltage_limits()
         self.end_voltage_spin.setRange(min_v, max_v)
         self.cut_voltage_spin.setRange(min_v - 500, max_v)
+        # Update restart voltage range based on battery type
+        self.restart_voltage_spin.setRange(min_v - 200, max_v)
+        # Peak sense (-dV) is only for Ni batteries (NiMH, NiCd, Eneloop)
+        is_ni_battery = battery_type in (3, 4, 6)  # NiMH, NiCd, Eneloop
+        self.peak_sense_spin.setEnabled(is_ni_battery)
+        if not is_ni_battery:
+            self.peak_sense_spin.setToolTip("-dV detection (only for NiMH/NiCd/Eneloop)")
+        else:
+            self.peak_sense_spin.setToolTip("-dV detection for NiMH/NiCd batteries")
 
     def get_config(self) -> SlotConfig:
         """Get current configuration from UI."""
@@ -376,10 +459,15 @@ class SlotConfigWidget(QWidget):
             charge_end_voltage_mv=self.end_voltage_spin.value(),
             discharge_cut_voltage_mv=self.cut_voltage_spin.value(),
             charge_end_current_ma=self.end_current_spin.value(),
+            discharge_reduce_current_ma=self.discharge_end_current_spin.value(),
             num_cycles=self.cycle_count_spin.value(),
             cycle_mode=self.cycle_mode_combo.currentIndex(),
-            charge_resting_min=self.rest_time_spin.value(),
-            discharge_resting_min=self.rest_time_spin.value(),
+            charge_resting_min=self.charge_rest_time_spin.value(),
+            discharge_resting_min=self.discharge_rest_time_spin.value(),
+            peak_sense_mv=self.peak_sense_spin.value(),
+            trickle_current_ma=self.trickle_current_spin.value(),
+            trickle_time=self.trickle_time_combo.currentData() or 0,
+            restart_voltage_mv=self.restart_voltage_spin.value(),
             cut_temperature_c=self.cut_temp_spin.value(),
             cut_time_min=self.cut_time_spin.value(),
         )
@@ -399,9 +487,17 @@ class SlotConfigWidget(QWidget):
         self.end_voltage_spin.setValue(config.charge_end_voltage_mv)
         self.cut_voltage_spin.setValue(config.discharge_cut_voltage_mv)
         self.end_current_spin.setValue(config.charge_end_current_ma)
+        self.discharge_end_current_spin.setValue(config.discharge_reduce_current_ma)
         self.cycle_count_spin.setValue(config.num_cycles)
         self.cycle_mode_combo.setCurrentIndex(config.cycle_mode)
-        self.rest_time_spin.setValue(config.charge_resting_min)
+        self.charge_rest_time_spin.setValue(config.charge_resting_min)
+        self.discharge_rest_time_spin.setValue(config.discharge_resting_min)
+        self.peak_sense_spin.setValue(config.peak_sense_mv)
+        self.trickle_current_spin.setValue(config.trickle_current_ma)
+        self.trickle_time_combo.setCurrentIndex(
+            self.trickle_time_combo.findData(config.trickle_time)
+        )
+        self.restart_voltage_spin.setValue(config.restart_voltage_mv)
         self.cut_temp_spin.setValue(config.cut_temperature_c)
         self.cut_time_spin.setValue(config.cut_time_min)
 
@@ -411,6 +507,7 @@ class SlotConfigWidget(QWidget):
             self.battery_type_combo.findData(settings.battery_type)
         )
         self._update_mode_combo()
+        self._update_voltage_limits()
         self.mode_combo.setCurrentIndex(
             self.mode_combo.findData(settings.operation_mode)
         )
@@ -420,9 +517,19 @@ class SlotConfigWidget(QWidget):
         self.end_voltage_spin.setValue(settings.charge_end_voltage_mv)
         self.cut_voltage_spin.setValue(settings.discharge_cut_voltage_mv)
         self.end_current_spin.setValue(settings.charge_end_current_ma)
+        self.discharge_end_current_spin.setValue(settings.discharge_reduce_current_ma)
         self.cycle_count_spin.setValue(settings.num_cycles)
         self.cycle_mode_combo.setCurrentIndex(settings.cycle_mode)
-        self.rest_time_spin.setValue(settings.charge_resting_min)
+        self.charge_rest_time_spin.setValue(settings.charge_resting_min)
+        # discharge_resting_min may be 0 for older firmware, use charge_resting_min as fallback
+        discharge_rest = settings.discharge_resting_min if settings.discharge_resting_min > 0 else settings.charge_resting_min
+        self.discharge_rest_time_spin.setValue(discharge_rest)
+        self.peak_sense_spin.setValue(settings.peak_sense_mv)
+        self.trickle_current_spin.setValue(settings.trickle_current_ma)
+        trickle_time_idx = self.trickle_time_combo.findData(settings.trickle_time)
+        if trickle_time_idx >= 0:
+            self.trickle_time_combo.setCurrentIndex(trickle_time_idx)
+        self.restart_voltage_spin.setValue(settings.restart_voltage_mv)
         self.cut_temp_spin.setValue(settings.cut_temperature_c)
         self.cut_time_spin.setValue(settings.cut_time_min)
 
@@ -468,8 +575,8 @@ class SlotConfigDialog(QDialog):
         self.mc3000 = mc3000_usb
         self.profile_manager = ProfileManager() if PROFILES_AVAILABLE else None
         self.setWindowTitle("Slot Configuration")
-        self.setMinimumSize(420, 760)
-        self.resize(520, 820)
+        self.setMinimumSize(580, 730)
+        self.resize(620, 785)
         self._setup_ui()
         self._read_all_configs(show_message=False)
 
@@ -498,7 +605,11 @@ class SlotConfigDialog(QDialog):
 
         copy_layout.addWidget(QLabel("to:"))
         self.copy_to_combo = QComboBox()
-        self.copy_to_combo.addItems(["Slot 1", "Slot 2", "Slot 3", "Slot 4"])
+        self.copy_to_combo.addItem("Slot 1", 0)
+        self.copy_to_combo.addItem("Slot 2", 1)
+        self.copy_to_combo.addItem("Slot 3", 2)
+        self.copy_to_combo.addItem("Slot 4", 3)
+        self.copy_to_combo.addItem("All slots", -1)
         self.copy_to_combo.setCurrentIndex(1)
         copy_layout.addWidget(self.copy_to_combo)
 
@@ -570,13 +681,26 @@ class SlotConfigDialog(QDialog):
     def _copy_settings(self):
         """Copy settings from one slot to another."""
         from_idx = self.copy_from_combo.currentIndex()
-        to_idx = self.copy_to_combo.currentIndex()
+        to_idx = self.copy_to_combo.currentData()
+        if to_idx is None:
+            to_idx = self.copy_to_combo.currentIndex()
 
-        if from_idx == to_idx:
+        if to_idx != -1 and from_idx == to_idx:
             QMessageBox.warning(self, "Copy Error", "Source and destination slots are the same.")
             return
 
         config = self.slot_widgets[from_idx].get_config()
+
+        if to_idx == -1:
+            for slot_idx in range(4):
+                config.slot_number = slot_idx
+                self.slot_widgets[slot_idx].set_config(config)
+            QMessageBox.information(
+                self, "Copy Complete",
+                f"Settings copied from Slot {from_idx + 1} to all slots"
+            )
+            return
+
         config.slot_number = to_idx
         self.slot_widgets[to_idx].set_config(config)
         self.tab_widget.setCurrentIndex(to_idx)

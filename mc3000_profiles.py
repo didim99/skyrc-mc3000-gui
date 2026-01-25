@@ -305,6 +305,10 @@ class ProfileManager:
             "cycle_mode": config.cycle_mode,
             "charge_resting_min": config.charge_resting_min,
             "discharge_resting_min": config.discharge_resting_min,
+            "peak_sense_mv": config.peak_sense_mv,
+            "trickle_current_ma": config.trickle_current_ma,
+            "trickle_time": config.trickle_time,
+            "restart_voltage_mv": config.restart_voltage_mv,
             "cut_temperature_c": config.cut_temperature_c,
             "cut_time_min": config.cut_time_min,
         }
@@ -344,6 +348,10 @@ class ProfileManager:
             cycle_mode=profile.get("cycle_mode", 0),
             charge_resting_min=profile.get("charge_resting_min", 3),
             discharge_resting_min=profile.get("discharge_resting_min", 3),
+            peak_sense_mv=profile.get("peak_sense_mv", 5),
+            trickle_current_ma=profile.get("trickle_current_ma", 50),
+            trickle_time=profile.get("trickle_time", 0),
+            restart_voltage_mv=profile.get("restart_voltage_mv", 1000),
             cut_temperature_c=profile.get("cut_temperature_c", 45),
             cut_time_min=profile.get("cut_time_min", 120),
         )
