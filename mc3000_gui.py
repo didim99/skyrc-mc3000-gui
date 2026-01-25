@@ -670,7 +670,16 @@ class MainWindow(QMainWindow):
     def _toggle_graphs(self, state):
         """Show or hide the graphs panel."""
         if self.graph_widget:
-            self.graph_widget.setVisible(state == Qt.Checked)
+            show = self.show_graphs_cb.isChecked()
+            if show:
+                self.graph_widget.setVisible(True)
+                # Restore splitter sizes when showing
+                if hasattr(self, '_saved_splitter_sizes') and self._saved_splitter_sizes:
+                    self.splitter.setSizes(self._saved_splitter_sizes)
+            else:
+                # Save splitter sizes before hiding
+                self._saved_splitter_sizes = self.splitter.sizes()
+                self.graph_widget.setVisible(False)
 
     def _is_connected(self) -> bool:
         """Check if connected to any device."""
