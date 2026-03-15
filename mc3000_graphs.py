@@ -5,6 +5,7 @@ Real-time plotting widgets for monitoring battery charging data.
 Uses pyqtgraph for fast, interactive plots.
 """
 
+import datetime
 from collections import deque
 from typing import Optional, Dict, List
 import time
@@ -106,6 +107,12 @@ class SlotDataHistory:
         return len(self.timestamps)
 
 
+class TimeAxisItem(pg.AxisItem):
+    def tickStrings(self, values: List[float],
+                    scale: float, spacing: float) -> List[str]:
+        return [str(datetime.timedelta(seconds=value)) for value in values]
+
+
 class SlotGraphWidget(QWidget):
     """Graph widget for a single slot with selectable metrics."""
 
@@ -159,6 +166,8 @@ class SlotGraphWidget(QWidget):
 
         # Create plot widget
         self.plot_widget = pg.PlotWidget()
+        time_axis = TimeAxisItem(orientation='bottom')
+        self.plot_widget.setAxisItems({'bottom': time_axis})
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel('bottom', 'Time', units='s')
         self.plot_widget.addLegend(offset=(10, 10))
@@ -264,6 +273,8 @@ class MultiSlotGraphWidget(QWidget):
 
         # Plot widget
         self.plot_widget = pg.PlotWidget()
+        time_axis = TimeAxisItem(orientation='bottom')
+        self.plot_widget.setAxisItems({'bottom': time_axis})
         self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
         self.plot_widget.setLabel('bottom', 'Time', units='s')
         self.plot_widget.addLegend(offset=(10, 10))
