@@ -5,7 +5,6 @@ Real-time plotting widgets for monitoring battery charging data.
 Uses pyqtgraph for fast, interactive plots.
 """
 
-import datetime
 from collections import deque
 from typing import Optional, Dict, List
 import time
@@ -108,9 +107,14 @@ class SlotDataHistory:
 
 
 class TimeAxisItem(pg.AxisItem):
+    @staticmethod
+    def _format(value: float) -> str:
+        fmt = "%M:%S" if value < 3600 else "%H:%M:%S"
+        return time.strftime(fmt, time.gmtime(value))
+
     def tickStrings(self, values: List[float],
                     scale: float, spacing: float) -> List[str]:
-        return [str(datetime.timedelta(seconds=value)) for value in values]
+        return [self._format(value) for value in values]
 
 
 class SlotGraphWidget(QWidget):
